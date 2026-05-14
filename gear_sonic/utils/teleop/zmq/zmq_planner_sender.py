@@ -74,6 +74,8 @@ def build_planner_message(
     vr_3pt_position: Sequence[float] | None = None,
     vr_3pt_orientation: Sequence[float] | None = None,
     vr_3pt_compliance: Sequence[float] | None = None,
+    left_gripper_cmd: float | None = None,
+    right_gripper_cmd: float | None = None,
 ) -> bytes:
     """
     Assemble a 'planner' topic message:
@@ -152,6 +154,14 @@ def build_planner_message(
         fields.append({"name": "vr_compliance", "dtype": "f32", "shape": [len(vr_3pt_compliance)]})
         for value in vr_3pt_compliance:
             payload += struct.pack("<f", float(value))
+
+    if left_gripper_cmd is not None:
+        fields.append({"name": "left_gripper_cmd", "dtype": "f32", "shape": [1]})
+        payload += struct.pack("<f", float(left_gripper_cmd))
+
+    if right_gripper_cmd is not None:
+        fields.append({"name": "right_gripper_cmd", "dtype": "f32", "shape": [1]})
+        payload += struct.pack("<f", float(right_gripper_cmd))
 
     header = _build_header(fields, version=1, count=1)
 
