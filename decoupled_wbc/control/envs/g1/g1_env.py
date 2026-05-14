@@ -8,6 +8,7 @@ from scipy.spatial.transform import Rotation as R
 from decoupled_wbc.control.base.humanoid_env import Hands, HumanoidEnv
 from decoupled_wbc.control.envs.g1.g1_body import G1Body
 from decoupled_wbc.control.envs.g1.g1_hand import G1ThreeFingerHand
+from decoupled_wbc.control.envs.g1.g1_dex1_gripper import G1DexGripper
 from decoupled_wbc.control.envs.g1.sim.simulator_factory import SimulatorFactory, init_channel
 from decoupled_wbc.control.envs.g1.utils.joint_safety import JointSafetyMonitor
 from decoupled_wbc.control.robot_model.instantiation.g1 import instantiate_g1_robot_model
@@ -54,6 +55,11 @@ class G1Env(HumanoidEnv):
             self._hands = Hands()
             self._hands.left = G1ThreeFingerHand(is_left=True)
             self._hands.right = G1ThreeFingerHand(is_left=False)
+
+        self.with_dex1_grippers = config.get("with_dex1_grippers", False)
+        if self.with_dex1_grippers:
+            self._left_gripper = G1DexGripper(is_left=True)
+            self._right_gripper = G1DexGripper(is_left=False)
 
         # Initialize simulator if in simulation mode
         self.use_sim = self.config.get("ENV_TYPE") == "sim"
@@ -184,6 +190,16 @@ class G1Env(HumanoidEnv):
         if self.use_sim and self.sim:
             obs.update(self.sim.get_privileged_obs())
 
+        if self.with_dex1_grippers:
+            left_gripper_obs = self._left_gripper.observe()
+            right_gripper_obs = self._right_gripper.observe()
+            obs["left_gripper_q"] = left_gripper_obs["gripper_q"]
+            obs["left_gripper_dq"] = left_gripper_obs["gripper_dq"]
+            obs["left_gripper_tau_est"] = left_gripper_obs["gripper_tau_est"]
+            obs["right_gripper_q"] = right_gripper_obs["gripper_q"]
+            obs["right_gripper_dq"] = right_gripper_obs["gripper_dq"]
+            obs["right_gripper_tau_est"] = right_gripper_obs["gripper_tau_est"]
+
         # Store last observation for safety checking
         self.last_obs = obs
 
@@ -239,6 +255,10 @@ class G1Env(HumanoidEnv):
             )
             self.hands().left.queue_action({"hand_q": left_hand_actuator_q})
             self.hands().right.queue_action({"hand_q": right_hand_actuator_q})
+
+        if self.with_dex1_grippers:
+            self._left_gripper.queue_action({"gripper_q": action.get("left_gripper_cmd", 0.0)})
+            self._right_gripper.queue_action({"gripper_q": action.get("right_gripper_cmd", 0.0)})
 
     def action_space(self) -> gym.Space:
         return gym.spaces.Box(low=-np.inf, high=np.inf, shape=(self.robot_model.num_dofs,))
