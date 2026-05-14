@@ -36,6 +36,7 @@ import torch
 import zmq
 
 from gear_sonic.utils.teleop.zmq.zmq_poller import ZMQPoller
+from gear_sonic.utils.teleop.dex1_gripper_sender import Dex1GripperSender
 from gear_sonic.trl.utils.rotation_conversion import decompose_rotation_aa
 from gear_sonic.trl.utils.torch_transform import (
     angle_axis_to_quaternion,
@@ -83,6 +84,13 @@ try:
 except ImportError:
     print("Warning: G1GripperInverseKinematicsSolver not available.")
     G1GripperInverseKinematicsSolver = None
+
+try:
+    from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+    _DEX1_AVAILABLE = True
+except ImportError:
+    print("Warning: unitree_sdk2py not available — Dex1-1 gripper control disabled.")
+    _DEX1_AVAILABLE = False
 
 try:
     from gear_sonic.utils.teleop.vis.vr3pt_pose_visualizer import VR3PtPoseVisualizer
@@ -1646,6 +1654,14 @@ class PlannerStreamer:
         # Hand IK solvers for trigger-controlled hand open/close in VR 3PT mode
         self.left_hand_ik_solver, self.right_hand_ik_solver = init_hand_ik_solvers()
 
+        # Dex1-1 gripper DDS publishers (None if unitree_sdk2py not available)
+        if _DEX1_AVAILABLE:
+            self.left_gripper_sender = Dex1GripperSender(is_left=True)
+            self.right_gripper_sender = Dex1GripperSender(is_left=False)
+        else:
+            self.left_gripper_sender = None
+            self.right_gripper_sender = None
+
     def reset_yaw(self):
         """Called when entering planner mode. Resets state for fresh start."""
         self.yaw_accumulator.reset()
@@ -1771,6 +1787,11 @@ class PlannerStreamer:
                 left_hand_position = lh_joints.reshape(-1).astype(np.float32).tolist()
                 right_hand_position = rh_joints.reshape(-1).astype(np.float32).tolist()
 
+                # Drive Dex1-1 grippers from triggers (disabled while left_menu_button held)
+                if self.left_gripper_sender is not None and not left_menu_button:
+                    self.left_gripper_sender.from_trigger(left_trigger)
+                    self.right_gripper_sender.from_trigger(right_trigger)
+
             msg = build_planner_message(
                 mode_to_send.value,
                 movement,
@@ -1814,6 +1835,7 @@ def run_pico_manager(
     with_g1_robot: bool = True,
     enable_waist_tracking: bool = False,
     enable_smpl_vis: bool = False,
+    dex1_network_interface: str = "",
 ):
     """
     Manager: creates shared PUB socket and runs pose/planner streamers based on current mode.
@@ -1827,6 +1849,11 @@ def run_pico_manager(
         )
     subprocess.Popen(["bash", "/opt/apps/roboticsservice/runService.sh"])
     xrt.init()
+
+    # Initialize DDS channel for Dex1-1 gripper communication (PC2 where dex_1_1_service runs)
+    if _DEX1_AVAILABLE:
+        ChannelFactoryInitialize(0, dex1_network_interface)
+
     print("Waiting for body tracking data...")
     while not xrt.is_body_data_available():
         print("waiting for body data...")
@@ -2156,6 +2183,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable SMPL body joint visualization (24 joint spheres) in the VR3pt viewer",
     )
+    parser.add_argument(
+        "--dex1_interface",
+        type=str,
+        default="",
+        help="Local network interface name for Dex1-1 DDS communication (e.g. eth0, wlan0). Empty = auto.",
+    )
     args = parser.parse_args()
 
     # Standalone VR3Pt test modes (exit after finishing)
@@ -2196,6 +2229,7 @@ if __name__ == "__main__":
             with_g1_robot=with_g1_robot,
             enable_waist_tracking=args.waist_tracking,
             enable_smpl_vis=args.vis_smpl,
+            dex1_network_interface=args.dex1_interface,
         )
     else:
         # Run legacy single-thread pose streaming
