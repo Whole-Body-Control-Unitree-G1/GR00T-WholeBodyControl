@@ -128,6 +128,9 @@ def main(config: ControlLoopConfig):
 
                 # Measure action queue time
                 with telemetry.timer("queue_action"):
+                    if upper_body_cmd:
+                        wbc_action["left_gripper_cmd"] = upper_body_cmd.get("left_gripper_cmd", 0.0)
+                        wbc_action["right_gripper_cmd"] = upper_body_cmd.get("right_gripper_cmd", 0.0)
                     env.queue_action(wbc_action)
 
                 # Publish status information for InteractiveModeController
