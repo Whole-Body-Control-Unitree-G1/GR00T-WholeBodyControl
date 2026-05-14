@@ -12,7 +12,7 @@ from unitree_sdk2py.idl.unitree_hg.msg.dds_ import (
     LowState_ as LowState_hg,
     OdoState_,
 )
-
+from unitree_sdk2py.idl.unitree_go.msg.dds_ import MotorStates_
 
 class BodyStateProcessor:
     def __init__(self, config):
@@ -141,3 +141,24 @@ class HandStateProcessor:
             .reshape(1, -1)
         )
         return state_data
+
+class Dex1StateProcessor:
+    def __init__(self, is_left: bool = True):
+        self.is_left = is_left
+        if self.is_left:
+            self.state_sub = ChannelSubscriber("rt/dex1/left/state", MotorStates_)
+        else:
+            self.state_sub = ChannelSubscriber("rt/dex1/right/state", MotorStates_)
+
+        self.state_sub.Init(None, 0)
+        self.state = None
+
+    def _prepare_low_state(self) -> np.ndarray:
+        self.state = self.state_sub.Read()
+
+        if not self.state:
+            print("No state received")
+            return None
+
+        s = self.state.states[0]
+        return np.array([s.q, s.dq, s.tau_est], dtype=np.float64).reshape(1, -1)
