@@ -135,6 +135,14 @@ class PicoStreamer(BaseStreamer):
         left_fingers = self._generate_finger_data(pico_data, "left")
         right_fingers = self._generate_finger_data(pico_data, "right")
 
+        MAX_GRIPPER_ANGLE = 5.5  # rad, based on dex1_1 test script range
+        if not pico_data["left_menu_button"]:
+            left_gripper_cmd = pico_data["left_trigger"] * MAX_GRIPPER_ANGLE
+            right_gripper_cmd = pico_data["right_trigger"] * MAX_GRIPPER_ANGLE
+        else:
+            left_gripper_cmd = 0.0
+            right_gripper_cmd = 0.0
+
         # Get activation commands
         toggle_policy_action_tmp = pico_data["left_menu_button"] and (
             pico_data["left_trigger"] > 0.5
@@ -182,6 +190,8 @@ class PicoStreamer(BaseStreamer):
                 "base_height_command": self.current_base_height,
                 "navigate_cmd": [lin_vel_x, lin_vel_y, ang_vel_z],
                 "toggle_policy_action": toggle_policy_action,
+                "left_gripper_cmd": left_gripper_cmd,
+                "right_gripper_cmd": right_gripper_cmd,
             },
             teleop_data={
                 "toggle_activation": toggle_activation,
