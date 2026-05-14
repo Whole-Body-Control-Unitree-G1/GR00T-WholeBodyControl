@@ -1804,6 +1804,8 @@ class PlannerStreamer:
                 vr_3pt_position=vr_3pt_position,
                 vr_3pt_orientation=vr_3pt_orientation,
                 vr_3pt_compliance=vr_3pt_compliance,
+                left_gripper_cmd=left_trigger if stream_mode == StreamMode.PLANNER_VR_3PT else None,
+                right_gripper_cmd=right_trigger if stream_mode == StreamMode.PLANNER_VR_3PT else None,
             )
             self.socket.send(msg)
         except Exception as e:

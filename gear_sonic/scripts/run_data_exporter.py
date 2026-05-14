@@ -49,6 +49,14 @@ from gear_sonic.utils.data_collection.zmq_state_subscriber import (
     poll_robot_config_zmq,
 )
 
+try:
+    from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+    from gear_sonic.utils.teleop.dex1_gripper_reader import Dex1GripperReader
+    _DEX1_AVAILABLE = True
+except ImportError:
+    print("Warning: unitree_sdk2py not available — Dex1-1 gripper recording disabled.")
+    _DEX1_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -102,6 +110,12 @@ class SonicDataExporterConfig:
 
     text_to_speech: bool = True
     """Use text-to-speech voice feedback."""
+
+    with_dex1_grippers: bool = False
+    """Record Dex1-1 parallel gripper state."""
+
+    dex1_network_interface: str = ""
+    """Local network interface for Dex1-1 DDS (e.g. wlp0s20f3). Empty = auto."""
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +241,7 @@ class GrootDataCollector:
         sonic_data_zmq_port: int = 5556,
         state_zmq_host: str = "localhost",
         state_zmq_port: int = 5557,
+        with_dex1_grippers: bool = False,
     ):
         self.text_to_speech = text_to_speech
         self.frequency = frequency
@@ -274,6 +289,16 @@ class GrootDataCollector:
             print(f"[Sonic] Warning: Failed to initialize ZMQ subscriber: {e}")
             self._sonic_zmq_socket = None
 
+        self.with_dex1_grippers = with_dex1_grippers and _DEX1_AVAILABLE
+        self._left_gripper_reader = None
+        self._right_gripper_reader = None
+        self.latest_left_gripper_msg = None
+        self.latest_right_gripper_msg = None
+        if self.with_dex1_grippers:
+            self._left_gripper_reader = Dex1GripperReader(is_left=True)
+            self._right_gripper_reader = Dex1GripperReader(is_left=False)
+            print("[Dex1] Gripper readers initialized")
+
         self.telemetry = Telemetry(window_size=100)
         self.sonic_timing_monitor = TimingThresholdMonitor(
             max_failures=3, reset_timeout_sec=5, time_delta=0.1
@@ -293,6 +318,17 @@ class GrootDataCollector:
             self.text_to_speech.print_and_say(message, say, blocking=blocking)
         else:
             print(message)
+
+    def _poll_gripper_state(self):
+        """Poll Dex1-1 gripper state via DDS (non-blocking)."""
+        if not self.with_dex1_grippers:
+            return
+        msg = self._left_gripper_reader.read()
+        if msg is not None:
+            self.latest_left_gripper_msg = msg
+        msg = self._right_gripper_reader.read()
+        if msg is not None:
+            self.latest_right_gripper_msg = msg
 
     def _poll_state_zmq(self):
         """Poll the ``g1_debug`` ZMQ topic for robot state (non-blocking)."""
@@ -404,6 +440,8 @@ class GrootDataCollector:
             "vr_3pt_orientation": vr_3pt_orientation,
             "left_hand_joints": self._extract_hand_joints(data, "left_hand_joints"),
             "right_hand_joints": self._extract_hand_joints(data, "right_hand_joints"),
+            "left_gripper_cmd": float(data["left_gripper_cmd"].flat[0]) if "left_gripper_cmd" in data else 0.0,
+            "right_gripper_cmd": float(data["right_gripper_cmd"].flat[0]) if "right_gripper_cmd" in data else 0.0,
             "receive_timestamp": time.time(),
         }
 
@@ -598,13 +636,23 @@ class GrootDataCollector:
             eef_parts.append(np.concatenate([pos, quat]))
         observation_eef_state = np.concatenate(eef_parts)
 
+        left_gripper = self.latest_left_gripper_msg
+        right_gripper = self.latest_right_gripper_msg
+
         frame_data: dict = {
             "observation.state": whole_q,
             "observation.eef_state": observation_eef_state,
             "action.wbc": whole_action_wbc,
+            "observation.left_gripper_state": np.array(
+                [left_gripper["q"], left_gripper["dq"], left_gripper["tau_est"]], dtype=np.float32
+            ) if left_gripper is not None else np.zeros(3, dtype=np.float32),
+            "observation.right_gripper_state": np.array(
+                [right_gripper["q"], right_gripper["dq"], right_gripper["tau_est"]], dtype=np.float32
+            ) if right_gripper is not None else np.zeros(3, dtype=np.float32),
         }
 
         self._add_cpp_state_features(frame_data, proprio)
+        self._add_gripper_features(frame_data)
 
         sonic_latency_ms = self._add_sonic_pose_features(frame_data)
 
@@ -614,6 +662,17 @@ class GrootDataCollector:
 
         self.data_exporter.add_frame(frame_data)
         return self._finalize_frame(t_start)
+
+    def _add_gripper_features(self, frame_data: dict) -> None:
+        planner_msg = self.latest_planner_msg
+        frame_data["action.left_gripper_cmd"] = np.array(
+            [planner_msg["left_gripper_cmd"]] if planner_msg is not None else [0.0],
+            dtype=np.float32,
+        )
+        frame_data["action.right_gripper_cmd"] = np.array(
+            [planner_msg["right_gripper_cmd"]] if planner_msg is not None else [0.0],
+            dtype=np.float32,
+        )
 
     def _add_cpp_state_features(self, frame_data: dict, proprio: dict) -> None:
         if "base_quat" in proprio:
@@ -867,6 +926,9 @@ class GrootDataCollector:
                     with self.telemetry.timer("poll_state"):
                         self._poll_state_zmq()
 
+                    with self.telemetry.timer("poll_gripper"):
+                        self._poll_gripper_state()
+
                     with self.telemetry.timer("poll_sonic"):
                         self._poll_sonic_zmq_messages()
 
@@ -939,6 +1001,9 @@ def main(config: SonicDataExporterConfig):
         script_config={**robot_config, "record_wrist_cameras": config.record_wrist_cameras},
     )
 
+    if config.with_dex1_grippers and _DEX1_AVAILABLE:
+        ChannelFactoryInitialize(0, config.dex1_network_interface)
+
     data_collector = GrootDataCollector(
         frequency=config.data_collection_frequency,
         data_exporter=data_exporter,
@@ -950,6 +1015,7 @@ def main(config: SonicDataExporterConfig):
         sonic_data_zmq_port=config.sonic_zmq_port,
         state_zmq_host=config.state_zmq_host,
         state_zmq_port=config.state_zmq_port,
+        with_dex1_grippers=config.with_dex1_grippers,
     )
     data_collector.run()
 

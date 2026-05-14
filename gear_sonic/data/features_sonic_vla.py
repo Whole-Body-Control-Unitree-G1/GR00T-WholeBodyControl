@@ -97,6 +97,16 @@ def get_modality_config_sonic_vla(robot_model: RobotModel) -> dict:
                 "original_key": "observation.init_base_quat",
                 "rotation_type": "quaternion",
             },
+            "left_gripper_state": {
+                "start": 0,
+                "end": 3,
+                "original_key": "observation.left_gripper_state",
+            },
+            "right_gripper_state": {
+                "start": 0,
+                "end": 3,
+                "original_key": "observation.right_gripper_state",
+            },
         },
         "action": {
             "delta_heading": {
@@ -191,6 +201,16 @@ def get_modality_config_sonic_vla(robot_model: RobotModel) -> dict:
                 "end": 18,
                 "original_key": "teleop.vr_3pt_orientation",
                 "rotation_type": "rotation_6d",
+            },
+            "left_gripper_cmd": {
+                "start": 0,
+                "end": 1,
+                "original_key": "action.left_gripper_cmd",
+            },
+            "right_gripper_cmd": {
+                "start": 0,
+                "end": 1,
+                "original_key": "action.right_gripper_cmd",
             },
         },
         "video": {
@@ -365,6 +385,26 @@ def get_features_sonic_vla(robot_model: RobotModel) -> dict:
                 "rwrist_r00", "rwrist_r10", "rwrist_r01", "rwrist_r11", "rwrist_r02", "rwrist_r12",
                 "neck_r00", "neck_r10", "neck_r01", "neck_r11", "neck_r02", "neck_r12",
             ],
+        },
+        "observation.left_gripper_state": {
+            "dtype": "float32",
+            "shape": (3,),
+            "names": ["left_gripper_q", "left_gripper_dq", "left_gripper_tau_est"],
+        },
+        "observation.right_gripper_state": {
+            "dtype": "float32",
+            "shape": (3,),
+            "names": ["right_gripper_q", "right_gripper_dq", "right_gripper_tau_est"],
+        },
+        "action.left_gripper_cmd": {
+            "dtype": "float32",
+            "shape": (1,),
+            "names": ["left_gripper_cmd"],
+        },
+        "action.right_gripper_cmd": {
+            "dtype": "float32",
+            "shape": (1,),
+            "names": ["right_gripper_cmd"],
         },
     }
 
