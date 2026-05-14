@@ -41,6 +41,7 @@ def override_wbc_config(
         "model_path": config.wbc_model_path,
         "enable_waist": config.enable_waist,
         "with_hands": config.with_hands,
+        "with_dex1_grippers": config.with_dex1_grippers,
         "verbose": config.verbose,
         "verbose_timing": config.verbose_timing,
         "upper_body_max_joint_speed": config.upper_body_joint_speed,
@@ -107,6 +108,9 @@ class BaseConfig(ArgsConfigTemplate):
 
     with_hands: bool = True
     """Enable hand functionality. When False, robot operates without hands."""
+
+    with_dex1_grippers: bool = False
+    """Enable Dex1-1 parallel gripper functionality."""
 
     high_elbow_pose: bool = False
     """Enable high elbow pose configuration for default joint positions."""
