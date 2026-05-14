@@ -2,9 +2,10 @@ from typing import Dict
 
 import numpy as np
 from unitree_sdk2py.core.channel import ChannelPublisher
-from unitree_sdk2py.idl.default import unitree_hg_msg_dds__HandCmd_
+from unitree_sdk2py.idl.default import unitree_hg_msg_dds__HandCmd_, unitree_go_msg_dds__MotorCmd_
 from unitree_sdk2py.idl.unitree_hg.msg.dds_ import HandCmd_
 from unitree_sdk2py.utils.crc import CRC
+from unitree_sdk2py.idl.unitree_go.msg.dds_ import MotorCmds_, MotorCmd_
 
 
 class BodyCommandSender:
@@ -144,3 +145,63 @@ class HandCommandSender:
             self.cmd.motor_cmd[i].kd = self.kd[i]
 
         self.cmd_pub.Write(self.cmd)
+
+class Dex1CommandSender:
+    """
+    Dex 1-1 gripper command sender class
+
+    Used to map the controls from PICO headset to Dex 1-1 gripper
+    """
+    def __init__(self, is_left: bool = True):
+        """
+        Constructor to control gripper.
+        Initialises the ChannelPublisher for a gripper.
+        Creates a cmd_publisher and instantiates the command object.
+
+        kp, kd need to be adjusted based on actual testing
+        Current values come from dex1_1 service(https://github.com/unitreerobotics/dex1_1_service)
+
+        Args
+        ----
+        is_left : bool
+                Used to determine left or right gripper
+        """
+        self.is_left = is_left
+        if self.is_left:
+            self.cmd_pub = ChannelPublisher("rt/dex1/left/cmd", MotorCmds_)
+        else:
+            self.cmd_pub = ChannelPublisher("rt/dex1/right/cmd", MotorCmds_)
+
+        self.cmd_pub.Init()
+        self.cmd = MotorCmds_(cmds=[unitree_go_msg_dds__MotorCmd_()])
+
+        self.hand_dof = 1
+
+        #Might have to tune
+        self.kp = 5.0
+        self.kd = 0.05
+
+    def send_command(self, cmd : float):
+        """
+        Method to send the command to the gripper.
+        The only values in the command that matter are,
+
+        mode : 1
+        q : position
+        kp : Position gain
+        kd : Derivative gain
+
+        the rest of the values by default are zero.
+
+        Args
+        ----
+        cmd : float
+            position info from PICO.
+
+        """
+        self.cmd.cmds[0].mode = 1
+        self.cmd.cmds[0].q = cmd
+        self.cmd.cmds[0].kp = self.kp
+        self.cmd.cmds[0].kd = self.kd
+        self.cmd_pub.Write(self.cmd)
+
