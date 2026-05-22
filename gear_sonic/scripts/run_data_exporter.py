@@ -664,14 +664,15 @@ class GrootDataCollector:
         return self._finalize_frame(t_start)
 
     def _add_gripper_features(self, frame_data: dict) -> None:
-        planner_msg = self.latest_planner_msg
+        # Use observed motor position as action — more reliable than trigger cmd when
+        # gripper stalls against an object and the motor holds rather than reaching target.
+        left  = self.latest_left_gripper_msg
+        right = self.latest_right_gripper_msg
         frame_data["action.left_gripper_cmd"] = np.array(
-            [planner_msg["left_gripper_cmd"]] if planner_msg is not None else [0.0],
-            dtype=np.float32,
+            [left["q"]] if left is not None else [0.0], dtype=np.float32,
         )
         frame_data["action.right_gripper_cmd"] = np.array(
-            [planner_msg["right_gripper_cmd"]] if planner_msg is not None else [0.0],
-            dtype=np.float32,
+            [right["q"]] if right is not None else [0.0], dtype=np.float32,
         )
 
     def _add_cpp_state_features(self, frame_data: dict, proprio: dict) -> None:
