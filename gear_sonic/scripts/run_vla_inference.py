@@ -32,6 +32,14 @@ import numpy as np
 import tyro
 import zmq
 
+try:
+    from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+    from gear_sonic.utils.teleop.dex1_gripper_reader import Dex1GripperReader
+    from gear_sonic.utils.teleop.dex1_gripper_sender import Dex1GripperSender
+    _DEX1_AVAILABLE = True
+except ImportError:
+    _DEX1_AVAILABLE = False
+
 from gear_sonic.camera.composed_camera import ComposedCameraClientSensor
 from gear_sonic.data.robot_model.instantiation.g1 import instantiate_g1_robot_model
 from gear_sonic.utils.data_collection.keyboard_subscriber import (
@@ -109,6 +117,13 @@ class InferenceConfig:
     # Embodiment
     embodiment_tag: str = "unitree_g1_sonic"
     """Embodiment tag for policy inference."""
+
+    # Dex1-1 grippers
+    with_dex1_grippers: bool = False
+    """Use Dex1-1 parallel grippers instead of dexterous hands."""
+
+    dex1_network_interface: str = ""
+    """Local network interface for Dex1-1 DDS (e.g. wlp0s20f3). Empty = auto."""
 
     # Prompt / eval
     prompt: str = "demo"
@@ -209,6 +224,8 @@ def prepare_observation_from_sensors(
     robot_model,
     language_prompt: str,
     log_errors: bool = False,
+    dex1_readers: tuple = None,
+    dex1_cache: dict = None,
 ):
     """Read sensors and prepare observation for the VLA policy.
 
@@ -265,6 +282,27 @@ def prepare_observation_from_sensors(
     observation["state"]["projected_gravity"] = np.asarray(
         projected_gravity, dtype=np.float32
     )[np.newaxis, np.newaxis]
+
+    if dex1_readers is not None:
+        left_reader, right_reader = dex1_readers
+        left_msg = left_reader.read()
+        right_msg = right_reader.read()
+        if left_msg is not None:
+            dex1_cache["left"] = left_msg
+        if right_msg is not None:
+            dex1_cache["right"] = right_msg
+        left_state = dex1_cache.get("left")
+        right_state = dex1_cache.get("right")
+        if left_state is None or right_state is None:
+            if log_errors:
+                print("[DEBUG] prepare_observation: waiting for dex1 gripper state..", flush=True)
+            return None
+        observation["state"]["left_gripper_state"] = np.array(
+            [left_state["q"], left_state["dq"], left_state["tau_est"]], dtype=np.float32
+        )[np.newaxis, np.newaxis]
+        observation["state"]["right_gripper_state"] = np.array(
+            [right_state["q"], right_state["dq"], right_state["tau_est"]], dtype=np.float32
+        )[np.newaxis, np.newaxis]
 
     return observation
 
@@ -358,6 +396,23 @@ def _compute_closed_hand_joints(side: str) -> np.ndarray:
 
 def main(config: InferenceConfig):
     pause_loop = True
+
+    if config.with_dex1_grippers:
+        if not _DEX1_AVAILABLE:
+            raise RuntimeError("unitree_sdk2py not available — cannot use --with-dex1-grippers")
+        ChannelFactoryInitialize(0, config.dex1_network_interface)
+        dex1_left_reader = Dex1GripperReader(is_left=True)
+        dex1_right_reader = Dex1GripperReader(is_left=False)
+        dex1_left_sender = Dex1GripperSender(is_left=True)
+        dex1_right_sender = Dex1GripperSender(is_left=False)
+        dex1_readers = (dex1_left_reader, dex1_right_reader)
+        dex1_cache: dict = {}
+        print_green("Dex1-1 gripper readers and senders initialized.")
+    else:
+        dex1_readers = None
+        dex1_cache = None
+        dex1_left_sender = None
+        dex1_right_sender = None
 
     robot_model = instantiate_g1_robot_model(waist_location="lower_and_upper_body")
 
@@ -557,6 +612,8 @@ def main(config: InferenceConfig):
                 robot_model=robot_model,
                 language_prompt=language_prompt_ref[0],
                 log_errors=True,
+                dex1_readers=dex1_readers,
+                dex1_cache=dex1_cache,
             ),
             lambda obs: run_policy_inference_and_process(
                 policy=n1_policy,
@@ -624,50 +681,83 @@ def main(config: InferenceConfig):
                         get_action_field(processed_action, "motion_token"),
                         dtype=np.float32,
                     )
-                    left_hand_joints = np.asarray(
-                        get_action_field(processed_action, "left_hand_joints"),
-                        dtype=np.float32,
-                    )
-                    right_hand_joints = np.asarray(
-                        get_action_field(processed_action, "right_hand_joints"),
-                        dtype=np.float32,
-                    )
 
                     # Action arrays arrive as (B, T, D) from the model.
                     # Squeeze batch dim to get (T, D), then index by time step.
                     if motion_token.ndim == 3:
                         motion_token = motion_token[0]
-                    if left_hand_joints.ndim == 3:
-                        left_hand_joints = left_hand_joints[0]
-                    if right_hand_joints.ndim == 3:
-                        right_hand_joints = right_hand_joints[0]
 
                     horizon = motion_token.shape[0] if motion_token.ndim == 2 else 1
                     current_idx = min(action_chunk_index, horizon - 1)
 
                     if motion_token.ndim == 2:
                         motion_token = motion_token[current_idx]
-                    if left_hand_joints.ndim == 2:
-                        left_hand_joints = left_hand_joints[current_idx]
-                    if right_hand_joints.ndim == 2:
-                        right_hand_joints = right_hand_joints[current_idx]
 
                     frame_index = np.array([zmq_frame_counter], dtype=np.int64)
                     zmq_frame_counter += 1
 
-                    zmq_message = pack_latent_action_message(
-                        motion_token,
-                        frame_index,
-                        left_hand_joints=left_hand_joints,
-                        right_hand_joints=right_hand_joints,
-                    )
-                    zmq_socket.send(zmq_message)
-                    if zmq_frame_counter % 50 == 0:
-                        print_green(
-                            f"ZMQ: Sent latent action - "
-                            f"frame: {frame_index[0]}, "
-                            f"token shape: {motion_token.shape}"
+                    if config.with_dex1_grippers:
+                        left_gripper_cmd = np.asarray(
+                            get_action_field(processed_action, "left_gripper_cmd"),
+                            dtype=np.float32,
                         )
+                        right_gripper_cmd = np.asarray(
+                            get_action_field(processed_action, "right_gripper_cmd"),
+                            dtype=np.float32,
+                        )
+                        if left_gripper_cmd.ndim == 3:
+                            left_gripper_cmd = left_gripper_cmd[0]
+                        if right_gripper_cmd.ndim == 3:
+                            right_gripper_cmd = right_gripper_cmd[0]
+                        if left_gripper_cmd.ndim == 2:
+                            left_gripper_cmd = left_gripper_cmd[current_idx]
+                        if right_gripper_cmd.ndim == 2:
+                            right_gripper_cmd = right_gripper_cmd[current_idx]
+
+                        zmq_message = pack_latent_action_message(motion_token, frame_index)
+                        zmq_socket.send(zmq_message)
+                        dex1_left_sender.send(float(left_gripper_cmd.flat[0]))
+                        dex1_right_sender.send(float(right_gripper_cmd.flat[0]))
+
+                        if zmq_frame_counter % 50 == 0:
+                            print_green(
+                                f"ZMQ: Sent latent action - "
+                                f"frame: {frame_index[0]}, "
+                                f"token shape: {motion_token.shape}, "
+                                f"grippers: L={left_gripper_cmd.flat[0]:.3f} R={right_gripper_cmd.flat[0]:.3f}"
+                            )
+                    else:
+                        left_hand_joints = np.asarray(
+                            get_action_field(processed_action, "left_hand_joints"),
+                            dtype=np.float32,
+                        )
+                        right_hand_joints = np.asarray(
+                            get_action_field(processed_action, "right_hand_joints"),
+                            dtype=np.float32,
+                        )
+                        if left_hand_joints.ndim == 3:
+                            left_hand_joints = left_hand_joints[0]
+                        if right_hand_joints.ndim == 3:
+                            right_hand_joints = right_hand_joints[0]
+                        if left_hand_joints.ndim == 2:
+                            left_hand_joints = left_hand_joints[current_idx]
+                        if right_hand_joints.ndim == 2:
+                            right_hand_joints = right_hand_joints[current_idx]
+
+                        zmq_message = pack_latent_action_message(
+                            motion_token,
+                            frame_index,
+                            left_hand_joints=left_hand_joints,
+                            right_hand_joints=right_hand_joints,
+                        )
+                        zmq_socket.send(zmq_message)
+
+                        if zmq_frame_counter % 50 == 0:
+                            print_green(
+                                f"ZMQ: Sent latent action - "
+                                f"frame: {frame_index[0]}, "
+                                f"token shape: {motion_token.shape}"
+                            )
 
                 action_chunk_index = min(action_chunk_index + 1, config.action_horizon - 1)
 
