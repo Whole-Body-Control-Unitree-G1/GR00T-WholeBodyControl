@@ -1286,6 +1286,9 @@ class PoseStreamer:
         (left_menu_button, left_trigger, right_trigger, left_grip, right_grip) = (
             get_controller_inputs()
         )
+        if self.left_gripper_sender is not None and not left_menu_button:
+            self.left_gripper_sender.from_trigger(left_trigger)
+            self.right_gripper_sender.from_trigger(right_trigger)
         # Get A and B button states for data collection control
         a_pressed, b_pressed, x_pressed, y_pressed = get_abxy_buttons()
 
@@ -1906,6 +1909,8 @@ def run_pico_manager(
         zmq_feedback_host=zmq_feedback_host,
         zmq_feedback_port=zmq_feedback_port,
     )
+    pose_streamer.left_gripper_sender = planner_streamer.left_gripper_sender
+    pose_streamer.right_gripper_sender = planner_streamer.right_gripper_sender
 
     # State machine diagram:
     #
