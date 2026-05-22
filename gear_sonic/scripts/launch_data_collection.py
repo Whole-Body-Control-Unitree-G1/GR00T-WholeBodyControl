@@ -141,6 +141,13 @@ class DataCollectionLaunchConfig:
     text_to_speech: bool = True
     """Enable voice feedback via espeak (data exporter)."""
 
+    # Dex1-1 grippers
+    with_dex1_grippers: bool = False
+    """Record Dex1-1 parallel gripper state and commands."""
+
+    dex1_network_interface: str = ""
+    """Local network interface for Dex1-1 DDS (e.g. wlp0s20f3). Empty = auto."""
+
     # Camera viewer
     camera_viewer: bool = True
     """Start the camera viewer pane."""
@@ -395,6 +402,8 @@ def main(config: DataCollectionLaunchConfig):
         exporter_cmd += " --record-wrist-cameras"
     if not config.text_to_speech:
         exporter_cmd += " --no-text-to-speech"
+    if config.with_dex1_grippers:
+        exporter_cmd += f" --with-dex1-grippers --dex1-network-interface {config.dex1_network_interface}"
 
     print("Starting data exporter (pane 1)...")
     _send_to_pane(2, exporter_cmd, wait=1.0)

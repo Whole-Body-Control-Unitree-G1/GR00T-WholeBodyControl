@@ -152,6 +152,13 @@ class InferenceLaunchConfig:
     dataset_name: str = ""
     """Dataset name for the data exporter. Leave empty to auto-generate."""
 
+    # Dex1-1 grippers
+    with_dex1_grippers: bool = False
+    """Use Dex1-1 parallel grippers instead of dexterous hands."""
+
+    dex1_network_interface: str = ""
+    """Local network interface for Dex1-1 DDS (e.g. wlp0s20f3). Empty = auto."""
+
 
 SESSION_NAME = "sonic_inference"
 
@@ -368,6 +375,8 @@ def main(config: InferenceLaunchConfig):
         )
         if config.dataset_name:
             exporter_cmd += f" --dataset-name '{config.dataset_name}'"
+        if config.with_dex1_grippers:
+            exporter_cmd += f" --with-dex1-grippers --dex1-network-interface {config.dex1_network_interface}"
 
         print("Starting data exporter (pane 3)...")
         _send_to_pane(3, exporter_cmd, wait=2.0)
@@ -386,6 +395,8 @@ def main(config: InferenceLaunchConfig):
         f"--camera-host {config.camera_host} "
         f"--camera-port {config.camera_port}"
     )
+    if config.with_dex1_grippers:
+        inference_cmd += f" --with-dex1-grippers --dex1-network-interface {config.dex1_network_interface}"
 
     print("Starting VLA inference (pane 1)...")
     _send_to_pane(2, inference_cmd, wait=1.0)
