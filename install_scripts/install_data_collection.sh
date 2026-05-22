@@ -66,6 +66,8 @@ echo "[INFO] Installing gear_sonic[data_collection] (this may take a few minutes
 # LeRobot's git repo contains LFS test artifacts that aren't needed at runtime.
 # Skip them to avoid download failures and save bandwidth.
 GIT_LFS_SKIP_SMUDGE=1 uv pip install -e "gear_sonic[data_collection]"
+echo "[INFO] Installing unitree_sdk2py …"
+uv pip install -e "external_dependencies/unitree_sdk2_python"
 
 echo ""
 echo "══════════════════════════════════════════════════════════════"

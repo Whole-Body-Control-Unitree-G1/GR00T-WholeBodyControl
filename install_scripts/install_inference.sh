@@ -58,6 +58,8 @@ uv venv .venv_inference --python "$MANAGED_PY" --prompt gear_sonic_inference
 source .venv_inference/bin/activate
 echo "[INFO] Installing gear_sonic[inference] (this may take a few minutes) …"
 uv pip install -e "gear_sonic[inference]"
+echo "[INFO] Installing unitree_sdk2py …"
+uv pip install -e "external_dependencies/unitree_sdk2_python"
 
 echo ""
 echo "══════════════════════════════════════════════════════════════"
