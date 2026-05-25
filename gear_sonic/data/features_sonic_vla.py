@@ -409,6 +409,22 @@ def get_features_sonic_vla(robot_model: RobotModel) -> dict:
     }
 
 
+def get_head_features() -> dict:
+    """Features for optional 2-DOF head (added when ``with_head`` is enabled)."""
+    return {
+        "observation.head_state": {
+            "dtype": "float32",
+            "shape": (2,),
+            "names": ["head_pitch", "head_yaw"],
+        },
+        "action.head_cmd": {
+            "dtype": "float32",
+            "shape": (2,),
+            "names": ["head_pitch_cmd", "head_yaw_cmd"],
+        },
+    }
+
+
 def get_wrist_camera_features() -> dict:
     """Features for optional wrist cameras (added when ``record_wrist_cameras`` is enabled)."""
     return {

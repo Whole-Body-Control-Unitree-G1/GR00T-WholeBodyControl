@@ -59,15 +59,13 @@ Then trigger the camera stream from the PICO XRoboToolkit app.
 ## Data Collection
 
 ### Option A — tmux launcher (recommended)
-Starts C++ deploy, PICO teleop, and data exporter in one tmux session:
+Starts C++ deploy, PICO teleop, data exporter, camera viewer, and ZED→PICO bridge in one tmux session:
 ```bash
-python gear_sonic/scripts/launch_data_collection.py \
-    --task-prompt "pick up the cup" \
-    --with-dex1-grippers \
-    --dex1-network-interface wlp0s20f3 \
-    --camera-host 192.168.123.164
+python gear_sonic/scripts/launch_data_collection.py --task-prompt "pick up the cup" --with-dex1-grippers --dex1-network-interface wlp0s20f3 --camera-host 192.168.123.164 --with-head
 ```
-Add `--no-camera-viewer` to skip the camera viewer pane.
+- Add `--no-camera-viewer` to skip the camera viewer pane.
+- Add `--no-zed-pico-bridge` to skip the ZED→PICO video bridge pane.
+- `--camera-host` is used by all panes (data exporter, camera viewer, ZED→PICO bridge).
 
 ### Option B — manual (separate terminals)
 
@@ -92,7 +90,14 @@ python gear_sonic/scripts/run_data_exporter.py \
     --task-prompt "pick up the cup" \
     --with-dex1-grippers \
     --dex1-network-interface wlp0s20f3 \
-    --camera-host 192.168.123.164
+    --camera-host 192.168.123.164 \
+    --with-head
+```
+
+**Terminal 4 — ZED→PICO bridge:**
+```bash
+source .venv_teleop/bin/activate
+python gear_sonic/scripts/zed_pico_zmq.py --zmq-host 192.168.123.164
 ```
 
 ### Recording Controls
@@ -180,15 +185,16 @@ python gear_sonic/scripts/run_vla_inference.py \
 
 ## Network / Ports
 
-| Service | Host | Port | Protocol |
-|---------|------|------|----------|
-| ZMQ camera bridge | Robot (192.168.123.164) | 5555 | ZMQ PUB |
-| ZMQ robot state (g1_debug) | Laptop | 5557 | ZMQ PUB |
-| ZMQ planner/manager | Laptop | 5556 | ZMQ PUB |
-| GR00T policy server | GPU server (lamb) | 5550 | ZMQ REQ/REP |
-| Keyboard publisher | Laptop | 5580 | ZMQ PUB |
-| XRoboToolkit command | Laptop | 13579 | TCP |
-| XRoboToolkit video | PICO | 12345 | TCP |
+| Port | Protocol | Publisher | Subscribers | Purpose |
+|------|----------|-----------|-------------|---------|
+| 5550 | ZMQ REQ/REP | GPU server (lamb) | Laptop inference script | GR00T PolicyServer — inference requests/responses |
+| 5555 | ZMQ PUB | Robot (192.168.123.164) ZMQ bridge | Laptop data exporter, inference script | Camera frames (`ego_view` + `stereo_view`) |
+| 5556 | ZMQ PUB | Laptop pico_manager / C++ deploy | Data exporter, C++ deploy | Action commands to C++ deploy loop (motion tokens, hand joints); also SMPL pose to data exporter |
+| 5557 | ZMQ PUB | Laptop C++ deploy | Inference script, data exporter | Robot state out of C++ deploy (joint pos/vel, projected gravity) |
+| 5558 | ZMQ REQ/REP | Sim only | Sim inference client | Policy server in MuJoCo sim (avoids conflict with 5555) |
+| 5580 | ZMQ PUB | Laptop keyboard publisher | C++ deploy | Keyboard keypresses — `k` starts the control loop |
+| 13579 | TCP | Laptop XRoboToolkit service | PICO | XRoboToolkit command channel |
+| 12345 | TCP | Laptop `zed_pico_zmq.py` | PICO | H.264 video stream to PICO headset |
 
 ---
 

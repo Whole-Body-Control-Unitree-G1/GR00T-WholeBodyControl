@@ -1291,6 +1291,8 @@ class PoseStreamer:
             self.right_gripper_sender.from_trigger(right_trigger)
         # Get A and B button states for data collection control
         a_pressed, b_pressed, x_pressed, y_pressed = get_abxy_buttons()
+        # Get right menu button for head zero pose calibration
+        _, right_menu_button = get_menu_buttons()
 
         # Data collection toggle logic (edge-triggered)
         # Left grip + A = toggle_data_collection
@@ -1471,6 +1473,8 @@ class PoseStreamer:
                 "right_hand_joints": right_hand_joints.reshape(-1).astype(np.float32),
                 "toggle_data_collection": np.array([toggle_data_collection], dtype=bool),
                 "toggle_data_abort": np.array([toggle_data_abort], dtype=bool),
+                "a_button": np.array([a_pressed], dtype=bool),
+                "right_menu_button": np.array([right_menu_button], dtype=bool),
                 "heading_increment": np.array(
                     [self.yaw_accumulator.yaw_angle_change()], dtype=np.float32
                 ),

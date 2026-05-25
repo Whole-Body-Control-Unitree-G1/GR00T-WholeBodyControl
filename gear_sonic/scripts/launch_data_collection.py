@@ -3,13 +3,16 @@ All-in-one tmux launcher for SONIC data collection.
 
 Starts the full data collection stack in a single tmux session:
 
-    Window 0 — data_collection (4 panes):
+    Window 0 — data_collection (5 panes):
     ┌───────────────────────┬───────────────────────┐
     │ Pane 0: C++ Deploy    │ Pane 1: Data Exporter │
     │ (gear_sonic_deploy)   │ (.venv_data_collection)│
     ├───────────────────────┼───────────────────────┤
     │ Pane 2: PICO Teleop   │ Pane 3: Camera Viewer │
     │ (.venv_teleop)        │ (.venv_data_collection)│
+    │                       ├───────────────────────┤
+    │                       │ Pane 4: ZED→PICO      │
+    │                       │ (.venv_teleop)        │
     └───────────────────────┴───────────────────────┘
 
     Window 1 — sim  (only when --sim is passed):
@@ -148,6 +151,14 @@ class DataCollectionLaunchConfig:
     dex1_network_interface: str = ""
     """Local network interface for Dex1-1 DDS (e.g. wlp0s20f3). Empty = auto."""
 
+    # 2-DOF head
+    with_head: bool = False
+    """Record 2-DOF head joint state and command via ZMQ bridge_node."""
+
+    # ZED → PICO video bridge
+    zed_pico_bridge: bool = True
+    """Run zed_pico_zmq.py to stream ZED stereo view to PICO headset."""
+
     # Camera viewer
     camera_viewer: bool = True
     """Start the camera viewer pane."""
@@ -252,6 +263,11 @@ def _create_tmux_session():
     # Split right pane vertically: pane 1 becomes top-right, new pane 3 bottom-right
     subprocess.run(
         ["tmux", "split-window", "-t", f"{SESSION_NAME}:0.2", "-v"],
+    )
+
+    # Split bottom-right pane again: pane 3 becomes camera viewer, pane 4 is ZED→PICO bridge
+    subprocess.run(
+        ["tmux", "split-window", "-t", f"{SESSION_NAME}:0.3", "-v"],
     )
 
     # Let all pane shells finish initialization (.bashrc, conda, etc.)
@@ -370,6 +386,8 @@ def main(config: DataCollectionLaunchConfig):
         pico_cmd += " --vis_smpl"
     if config.pico_waist_tracking:
         pico_cmd += " --waist_tracking"
+    if config.with_dex1_grippers and config.dex1_network_interface:
+        pico_cmd += f" --dex1_interface {config.dex1_network_interface}"
 
     print("Starting PICO teleop streamer (pane 2)...")
     _send_to_pane(1, pico_cmd, wait=2.0)
@@ -385,6 +403,16 @@ def main(config: DataCollectionLaunchConfig):
         )
         print("Starting camera viewer (pane 3)...")
         _send_to_pane(3, viewer_cmd, wait=2.0)
+
+    # --- Pane 4 (bottom-right split): ZED → PICO video bridge ---
+    if config.zed_pico_bridge:
+        zed_cmd = (
+            f"cd {repo_root} && "
+            f"source .venv_teleop/bin/activate && "
+            f"python gear_sonic/scripts/zed_pico_zmq.py --zmq-host {config.camera_host}"
+        )
+        print("Starting ZED→PICO bridge (pane 4)...")
+        _send_to_pane(4, zed_cmd, wait=1.0)
 
     # --- Pane 1 (top-right): Data Exporter ---
     exporter_cmd = (
@@ -404,6 +432,8 @@ def main(config: DataCollectionLaunchConfig):
         exporter_cmd += " --no-text-to-speech"
     if config.with_dex1_grippers:
         exporter_cmd += f" --with-dex1-grippers --dex1-network-interface {config.dex1_network_interface}"
+    if config.with_head:
+        exporter_cmd += " --with-head"
 
     print("Starting data exporter (pane 1)...")
     _send_to_pane(2, exporter_cmd, wait=1.0)

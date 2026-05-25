@@ -34,6 +34,7 @@ from gear_sonic.data.exporter import Gr00tDataExporter
 from gear_sonic.data.features_sonic_vla import (
     get_features_sonic_vla,
     get_g1_robot_model,
+    get_head_features,
     get_modality_config_sonic_vla,
     get_wrist_camera_features,
     get_wrist_camera_modality_config,
@@ -117,6 +118,15 @@ class SonicDataExporterConfig:
     dex1_network_interface: str = ""
     """Local network interface for Dex1-1 DDS (e.g. wlp0s20f3). Empty = auto."""
 
+    with_head: bool = False
+    """Record 2-DOF head joint state and command."""
+
+    head_zmq_host: str = "localhost"
+    """ZMQ host for head state (bridge_node on robot, head_state topic)."""
+
+    head_zmq_port: int = 5558
+    """ZMQ port for head state (bridge_node publishes here)."""
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -176,6 +186,18 @@ def unpack_pose_message(packed_data: bytes, topic: str = "pose") -> dict:
         current_offset += n_bytes
 
     return result
+
+
+def unpack_head_state_message(raw: bytes) -> np.ndarray | None:
+    """Unpack head_state message from bridge_node — returns [pitch, yaw] float32[2]."""
+    TOPIC = b"head_state"
+    HEADER_SIZE = 1024
+    if not raw.startswith(TOPIC):
+        return None
+    binary = raw[len(TOPIC) + HEADER_SIZE:]
+    if len(binary) < 8:
+        return None
+    return np.frombuffer(binary[:8], dtype=np.float32).copy()
 
 
 class TimingThresholdMonitor:
@@ -242,6 +264,9 @@ class GrootDataCollector:
         state_zmq_host: str = "localhost",
         state_zmq_port: int = 5557,
         with_dex1_grippers: bool = False,
+        with_head: bool = False,
+        head_zmq_host: str = "localhost",
+        head_zmq_port: int = 5558,
     ):
         self.text_to_speech = text_to_speech
         self.frequency = frequency
@@ -299,6 +324,19 @@ class GrootDataCollector:
             self._right_gripper_reader = Dex1GripperReader(is_left=False)
             print("[Dex1] Gripper readers initialized")
 
+        self.with_head = with_head
+        self._head_zmq_ctx = None
+        self._head_zmq_socket = None
+        self.latest_head_state: np.ndarray | None = None
+        if self.with_head:
+            self._head_zmq_ctx = zmq.Context()
+            self._head_zmq_socket = self._head_zmq_ctx.socket(zmq.SUB)
+            self._head_zmq_socket.connect(f"tcp://{head_zmq_host}:{head_zmq_port}")
+            self._head_zmq_socket.setsockopt(zmq.RCVTIMEO, 100)
+            self._head_zmq_socket.setsockopt(zmq.CONFLATE, 1)
+            self._head_zmq_socket.setsockopt_string(zmq.SUBSCRIBE, "head_state")
+            print(f"[Head] Connected to ZMQ at {head_zmq_host}:{head_zmq_port}")
+
         self.telemetry = Telemetry(window_size=100)
         self.sonic_timing_monitor = TimingThresholdMonitor(
             max_failures=3, reset_timeout_sec=5, time_delta=0.1
@@ -329,6 +367,18 @@ class GrootDataCollector:
         msg = self._right_gripper_reader.read()
         if msg is not None:
             self.latest_right_gripper_msg = msg
+
+    def _poll_head_state(self):
+        """Poll head joint state from bridge_node (non-blocking)."""
+        if not self.with_head or self._head_zmq_socket is None:
+            return
+        try:
+            raw = self._head_zmq_socket.recv(flags=zmq.NOBLOCK)
+            state = unpack_head_state_message(raw)
+            if state is not None:
+                self.latest_head_state = state
+        except zmq.Again:
+            pass
 
     def _poll_state_zmq(self):
         """Poll the ``g1_debug`` ZMQ topic for robot state (non-blocking)."""
@@ -653,6 +703,7 @@ class GrootDataCollector:
 
         self._add_cpp_state_features(frame_data, proprio)
         self._add_gripper_features(frame_data)
+        self._add_head_features(frame_data)
 
         sonic_latency_ms = self._add_sonic_pose_features(frame_data)
 
@@ -674,6 +725,14 @@ class GrootDataCollector:
         frame_data["action.right_gripper_cmd"] = np.array(
             [right["q"]] if right is not None else [0.0], dtype=np.float32,
         )
+
+    def _add_head_features(self, frame_data: dict) -> None:
+        if not self.with_head:
+            return
+        head = self.latest_head_state
+        val = head if head is not None else np.zeros(2, dtype=np.float32)
+        frame_data["observation.head_state"] = val
+        frame_data["action.head_cmd"] = val
 
     def _add_cpp_state_features(self, frame_data: dict, proprio: dict) -> None:
         if "base_quat" in proprio:
@@ -904,13 +963,13 @@ class GrootDataCollector:
             self._state_subscriber.close()
         except Exception:
             pass
-        for sock in [self._sonic_zmq_socket]:
+        for sock in [self._sonic_zmq_socket, self._head_zmq_socket]:
             if sock is not None:
                 try:
                     sock.close()
                 except Exception:
                     pass
-        for ctx in [self._sonic_zmq_ctx]:
+        for ctx in [self._sonic_zmq_ctx, self._head_zmq_ctx]:
             if ctx is not None:
                 try:
                     ctx.term()
@@ -929,6 +988,9 @@ class GrootDataCollector:
 
                     with self.telemetry.timer("poll_gripper"):
                         self._poll_gripper_state()
+
+                    with self.telemetry.timer("poll_head"):
+                        self._poll_head_state()
 
                     with self.telemetry.timer("poll_sonic"):
                         self._poll_sonic_zmq_messages()
@@ -977,6 +1039,10 @@ def main(config: SonicDataExporterConfig):
     dataset_features = get_features_sonic_vla(g1_rm)
     modality_config = get_modality_config_sonic_vla(g1_rm)
 
+    if config.with_head:
+        print("[Head] 2-DOF head enabled — adding to dataset schema")
+        dataset_features.update(get_head_features())
+
     if config.record_wrist_cameras:
         print("[Camera] Wrist cameras enabled — adding to dataset schema")
         dataset_features.update(get_wrist_camera_features())
@@ -1017,6 +1083,9 @@ def main(config: SonicDataExporterConfig):
         state_zmq_host=config.state_zmq_host,
         state_zmq_port=config.state_zmq_port,
         with_dex1_grippers=config.with_dex1_grippers,
+        with_head=config.with_head,
+        head_zmq_host=config.head_zmq_host,
+        head_zmq_port=config.head_zmq_port,
     )
     data_collector.run()
 
