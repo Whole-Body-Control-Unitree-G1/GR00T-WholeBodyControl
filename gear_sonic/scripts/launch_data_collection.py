@@ -155,6 +155,10 @@ class DataCollectionLaunchConfig:
     with_head: bool = False
     """Record 2-DOF head joint state and command via ZMQ bridge_node."""
 
+    # Rerun visualizer
+    with_rerun: bool = False
+    """Launch Rerun visualizer window during data collection."""
+
     # ZED → PICO video bridge
     zed_pico_bridge: bool = True
     """Run zed_pico_zmq.py to stream ZED stereo view to PICO headset."""
@@ -433,7 +437,9 @@ def main(config: DataCollectionLaunchConfig):
     if config.with_dex1_grippers:
         exporter_cmd += f" --with-dex1-grippers --dex1-network-interface {config.dex1_network_interface}"
     if config.with_head:
-        exporter_cmd += " --with-head"
+        exporter_cmd += f" --with-head --head-zmq-host {config.camera_host}"
+    if config.with_rerun:
+        exporter_cmd += " --with-rerun"
 
     print("Starting data exporter (pane 1)...")
     _send_to_pane(2, exporter_cmd, wait=1.0)

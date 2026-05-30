@@ -451,6 +451,26 @@ def get_wrist_camera_modality_config() -> dict:
     }
 
 
+def get_head_modality_config() -> dict:
+    """Modality config entries for optional 2-DOF head."""
+    return {
+        "state": {
+            "head_state": {
+                "start": 0,
+                "end": 2,
+                "original_key": "observation.head_state",
+            },
+        },
+        "action": {
+            "head_cmd": {
+                "start": 0,
+                "end": 2,
+                "original_key": "action.head_cmd",
+            },
+        },
+    }
+
+
 def get_g1_robot_model(
     waist_location: Literal[
         "lower_body", "upper_body", "lower_and_upper_body"

@@ -125,6 +125,16 @@ class InferenceConfig:
     dex1_network_interface: str = ""
     """Local network interface for Dex1-1 DDS (e.g. wlp0s20f3). Empty = auto."""
 
+    # 2-DOF head
+    with_head: bool = False
+    """Enable 2-DOF head control (requires bridge_node running on robot)."""
+
+    head_zmq_host: str = "localhost"
+    """ZMQ host where bridge_node publishes head_state (port 5558)."""
+
+    head_zmq_port: int = 5558
+    """ZMQ port for head state from bridge_node."""
+
     # Prompt / eval
     prompt: str = "demo"
     """The language prompt for the VLA policy."""
@@ -214,6 +224,28 @@ def get_action_field(action_dict: dict, key: str):
 
 
 # ---------------------------------------------------------------------------
+# Head ZMQ helpers
+# ---------------------------------------------------------------------------
+
+_HEAD_STATE_TOPIC = b"head_state"
+_HEAD_STATE_HEADER_SIZE = 1024
+
+def _unpack_head_state(raw: bytes) -> np.ndarray | None:
+    """Unpack head_state message from bridge_node — returns float32[2] [pitch, yaw]."""
+    try:
+        payload = raw[len(_HEAD_STATE_TOPIC):]
+        data = np.frombuffer(payload[_HEAD_STATE_HEADER_SIZE:], dtype=np.float32)
+        return data[:2].copy() if data.size >= 2 else None
+    except Exception:
+        return None
+
+
+def _pack_head_cmd(pitch: float, yaw: float) -> bytes:
+    """Pack head_cmd message for bridge_node — topic prefix + float32[2]."""
+    return b"head_cmd" + np.array([pitch, yaw], dtype=np.float32).tobytes()
+
+
+# ---------------------------------------------------------------------------
 # Observation / inference helpers
 # ---------------------------------------------------------------------------
 
@@ -226,6 +258,8 @@ def prepare_observation_from_sensors(
     log_errors: bool = False,
     dex1_readers: tuple = None,
     dex1_cache: dict = None,
+    head_state_sock=None,
+    head_state_cache: list = None,
 ):
     """Read sensors and prepare observation for the VLA policy.
 
@@ -303,6 +337,16 @@ def prepare_observation_from_sensors(
         observation["state"]["right_gripper_state"] = np.array(
             [right_state["q"], right_state["dq"], right_state["tau_est"]], dtype=np.float32
         )[np.newaxis, np.newaxis]
+
+    if head_state_sock is not None and head_state_cache is not None:
+        try:
+            raw = head_state_sock.recv(flags=zmq.NOBLOCK)
+            state = _unpack_head_state(raw)
+            if state is not None:
+                head_state_cache[0] = state
+        except zmq.Again:
+            pass
+        observation["state"]["head_state"] = head_state_cache[0][np.newaxis, np.newaxis]
 
     return observation
 
@@ -413,6 +457,18 @@ def main(config: InferenceConfig):
         dex1_cache = None
         dex1_left_sender = None
         dex1_right_sender = None
+
+    if config.with_head:
+        head_zmq_ctx = zmq.Context()
+        head_state_sock = head_zmq_ctx.socket(zmq.SUB)
+        head_state_sock.connect(f"tcp://{config.head_zmq_host}:{config.head_zmq_port}")
+        head_state_sock.setsockopt_string(zmq.SUBSCRIBE, "head_state")
+        head_state_sock.setsockopt(zmq.RCVTIMEO, 0)
+        head_state_cache: np.ndarray = np.zeros(2, dtype=np.float32)
+        print_green(f"Head state subscriber connected to tcp://{config.head_zmq_host}:{config.head_zmq_port}")
+    else:
+        head_state_sock = None
+        head_state_cache = None
 
     robot_model = instantiate_g1_robot_model(waist_location="lower_and_upper_body")
 
@@ -614,6 +670,8 @@ def main(config: InferenceConfig):
                 log_errors=True,
                 dex1_readers=dex1_readers,
                 dex1_cache=dex1_cache,
+                head_state_sock=head_state_sock,
+                head_state_cache=[head_state_cache] if head_state_cache is not None else None,
             ),
             lambda obs: run_policy_inference_and_process(
                 policy=n1_policy,
@@ -719,6 +777,15 @@ def main(config: InferenceConfig):
                         dex1_left_sender.send(float(left_gripper_cmd.flat[0]))
                         dex1_right_sender.send(float(right_gripper_cmd.flat[0]))
 
+                        if config.with_head:
+                            head_cmd = np.asarray(
+                                get_action_field(processed_action, "head_cmd"), dtype=np.float32
+                            )
+                            if head_cmd.ndim == 3:
+                                head_cmd = head_cmd[0]  # strip batch: (1,40,2) → (40,2)
+                            head_cmd = head_cmd[current_idx]  # (40,2) → (2,)
+                            zmq_socket.send(_pack_head_cmd(float(head_cmd[0]), float(head_cmd[1])))
+
                         if zmq_frame_counter % 50 == 0:
                             print_green(
                                 f"ZMQ: Sent latent action - "
@@ -751,6 +818,15 @@ def main(config: InferenceConfig):
                             right_hand_joints=right_hand_joints,
                         )
                         zmq_socket.send(zmq_message)
+
+                        if config.with_head:
+                            head_cmd = np.asarray(
+                                get_action_field(processed_action, "head_cmd"), dtype=np.float32
+                            )
+                            if head_cmd.ndim == 3:
+                                head_cmd = head_cmd[0]  # strip batch: (1,40,2) → (40,2)
+                            head_cmd = head_cmd[current_idx]  # (40,2) → (2,)
+                            zmq_socket.send(_pack_head_cmd(float(head_cmd[0]), float(head_cmd[1])))
 
                         if zmq_frame_counter % 50 == 0:
                             print_green(

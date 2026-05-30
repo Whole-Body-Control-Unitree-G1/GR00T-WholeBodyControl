@@ -37,6 +37,7 @@ from gear_sonic.data.features_sonic_vla import (
     get_head_features,
     get_modality_config_sonic_vla,
     get_wrist_camera_features,
+    get_head_modality_config,
     get_wrist_camera_modality_config,
 )
 from gear_sonic.camera.composed_camera import ComposedCameraClientSensor
@@ -121,6 +122,12 @@ class SonicDataExporterConfig:
     with_head: bool = False
     """Record 2-DOF head joint state and command."""
 
+    with_rerun: bool = False
+    """Stream live data to a Rerun visualizer window."""
+
+    rerun_memory_limit: str = "10%"
+    """Rerun viewer memory limit (e.g. '10%', '500MB')."""
+
     head_zmq_host: str = "localhost"
     """ZMQ host for head state (bridge_node on robot, head_state topic)."""
 
@@ -200,6 +207,74 @@ def unpack_head_state_message(raw: bytes) -> np.ndarray | None:
     return np.frombuffer(binary[:8], dtype=np.float32).copy()
 
 
+class RerunLogger:
+    """Streams frame data to a Rerun viewer. No-ops when disabled."""
+
+    def __init__(self, enabled: bool, memory_limit: str = "10%"):
+        self.enabled = enabled
+        if not enabled:
+            return
+        import rerun as rr
+        self._rr = rr
+        rr.init("gear_sonic_data_collection")
+        rr.spawn(memory_limit=memory_limit)
+        print("[Rerun] Viewer launched")
+
+    def log_frame(self, frame_data: dict, image: np.ndarray | None, is_recording: bool):
+        if not self.enabled:
+            return
+        rr = self._rr
+
+        # Recording status
+        rr.log("recording/status", rr.TextLog(
+            "RECORDING" if is_recording else "IDLE",
+            level=rr.TextLogLevel.INFO,
+        ))
+
+        # Camera
+        if image is not None:
+            rr.log("camera/ego_view", rr.Image(image))
+
+        # Joint state (body joints as individual scalars)
+        state = frame_data.get("observation.state")
+        if state is not None:
+            for i, v in enumerate(np.asarray(state).flat):
+                rr.log(f"state/joints/{i}", rr.Scalar(float(v)))
+
+        # Gripper state
+        for side in ("left", "right"):
+            gs = frame_data.get(f"observation.{side}_gripper_state")
+            if gs is not None:
+                gs = np.asarray(gs).flat
+                rr.log(f"state/gripper/{side}/q",       rr.Scalar(float(next(gs))))
+                rr.log(f"state/gripper/{side}/dq",      rr.Scalar(float(next(gs))))
+                rr.log(f"state/gripper/{side}/tau_est", rr.Scalar(float(next(gs))))
+
+        # Head state
+        head = frame_data.get("observation.head_state")
+        if head is not None:
+            head = np.asarray(head)
+            rr.log("state/head/pitch", rr.Scalar(float(head[0])))
+            rr.log("state/head/yaw",   rr.Scalar(float(head[1])))
+
+        # WBC action
+        wbc = frame_data.get("action.wbc")
+        if wbc is not None:
+            for i, v in enumerate(np.asarray(wbc).flat):
+                rr.log(f"action/wbc/{i}", rr.Scalar(float(v)))
+
+        # Gripper commands
+        for side in ("left", "right"):
+            cmd = frame_data.get(f"action.{side}_gripper_cmd")
+            if cmd is not None:
+                rr.log(f"action/gripper/{side}", rr.Scalar(float(np.asarray(cmd).flat[0])))
+
+    def log_episode_event(self, event: str):
+        if not self.enabled:
+            return
+        self._rr.log("recording/events", self._rr.TextLog(event, level=self._rr.TextLogLevel.INFO))
+
+
 class TimingThresholdMonitor:
     def __init__(self, max_failures=3, reset_timeout_sec=5, time_delta=0.2, raise_exception=False):
         self.max_failures = max_failures
@@ -267,6 +342,7 @@ class GrootDataCollector:
         with_head: bool = False,
         head_zmq_host: str = "localhost",
         head_zmq_port: int = 5558,
+        rerun_logger: "RerunLogger | None" = None,
     ):
         self.text_to_speech = text_to_speech
         self.frequency = frequency
@@ -336,6 +412,8 @@ class GrootDataCollector:
             self._head_zmq_socket.setsockopt(zmq.CONFLATE, 1)
             self._head_zmq_socket.setsockopt_string(zmq.SUBSCRIBE, "head_state")
             print(f"[Head] Connected to ZMQ at {head_zmq_host}:{head_zmq_port}")
+
+        self._rerun = rerun_logger
 
         self.telemetry = Telemetry(window_size=100)
         self.sonic_timing_monitor = TimingThresholdMonitor(
@@ -409,16 +487,22 @@ class GrootDataCollector:
                 self._print_and_say(
                     f"Started recording {self.current_episode_index}", blocking=False
                 )
+                if self._rerun:
+                    self._rerun.log_episode_event(f"START episode {self.current_episode_index}")
             elif self._episode_state.get_state() == self._episode_state.NEED_TO_SAVE:
                 self._print_and_say("Stopping recording, preparing to save", blocking=False)
             elif self._episode_state.get_state() == self._episode_state.IDLE:
                 self._print_and_say("Saved episode and back to idle state", blocking=False)
+                if self._rerun:
+                    self._rerun.log_episode_event(f"SAVED episode {self.current_episode_index}")
         elif key == "x":
             if self._episode_state.get_state() == self._episode_state.RECORDING:
                 self.data_exporter.save_episode_as_discarded()
                 self._episode_state.reset_state()
                 self._initial_yaw = None
                 self._print_and_say("Discarded episode", blocking=False)
+                if self._rerun:
+                    self._rerun.log_episode_event("DISCARDED episode")
 
     def _poll_sonic_zmq_messages(self):
         """Poll ZMQ for pose, planner, and manager_state messages (non-blocking)."""
@@ -710,6 +794,13 @@ class GrootDataCollector:
         self._add_images_to_frame_data(frame_data)
 
         self._log_latency_periodic(sonic_latency_ms)
+
+        if self._rerun is not None:
+            self._rerun.log_frame(
+                frame_data,
+                image=self.latest_image_msg["images"].get("ego_view") if self.latest_image_msg else None,
+                is_recording=self._episode_state.get_state() == self._episode_state.RECORDING,
+            )
 
         self.data_exporter.add_frame(frame_data)
         return self._finalize_frame(t_start)
@@ -1042,6 +1133,12 @@ def main(config: SonicDataExporterConfig):
     if config.with_head:
         print("[Head] 2-DOF head enabled — adding to dataset schema")
         dataset_features.update(get_head_features())
+        head_modality = get_head_modality_config()
+        for key, value in head_modality.items():
+            if key in modality_config:
+                modality_config[key].update(value)
+            else:
+                modality_config[key] = value
 
     if config.record_wrist_cameras:
         print("[Camera] Wrist cameras enabled — adding to dataset schema")
@@ -1071,6 +1168,8 @@ def main(config: SonicDataExporterConfig):
     if config.with_dex1_grippers and _DEX1_AVAILABLE:
         ChannelFactoryInitialize(0, config.dex1_network_interface)
 
+    rerun_logger = RerunLogger(config.with_rerun, memory_limit=config.rerun_memory_limit)
+
     data_collector = GrootDataCollector(
         frequency=config.data_collection_frequency,
         data_exporter=data_exporter,
@@ -1086,6 +1185,7 @@ def main(config: SonicDataExporterConfig):
         with_head=config.with_head,
         head_zmq_host=config.head_zmq_host,
         head_zmq_port=config.head_zmq_port,
+        rerun_logger=rerun_logger,
     )
     data_collector.run()
 
