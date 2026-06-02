@@ -73,7 +73,11 @@ class SonicDataExporterConfig:
     """Dataset name (auto-generated if creating new)."""
 
     task_prompt: str = "demo"
-    """Language task prompt."""
+    """Language task prompt. Used as the only prompt when --prompt-file is not set."""
+
+    prompt_file: str = ""
+    """Path to a JSON file with a list of task prompts to cycle through (left grip + X
+    switches to the next one while IDLE). Empty = use --task-prompt only."""
 
     root_output_dir: str = "outputs"
     """Root output directory."""
@@ -343,6 +347,7 @@ class GrootDataCollector:
         head_zmq_host: str = "localhost",
         head_zmq_port: int = 5558,
         rerun_logger: "RerunLogger | None" = None,
+        prompts: "list[str] | None" = None,
     ):
         self.text_to_speech = text_to_speech
         self.frequency = frequency
@@ -365,6 +370,11 @@ class GrootDataCollector:
 
         self._manager_toggle_dc = False
         self._manager_toggle_da = False
+        self._manager_toggle_prompt = False
+
+        # Task prompts to cycle through (left grip + X while IDLE).
+        self._prompts = prompts if prompts else [data_exporter.task]
+        self._prompt_idx = 0
 
         self._state_subscriber = ZMQStateSubscriber(
             host=state_zmq_host,
@@ -479,6 +489,9 @@ class GrootDataCollector:
         elif self._manager_toggle_dc:
             key = "c"
             self._manager_toggle_dc = False
+        elif self._manager_toggle_prompt:
+            key = "p"
+            self._manager_toggle_prompt = False
 
         if key == "c":
             self._episode_state.change_state()
@@ -503,6 +516,22 @@ class GrootDataCollector:
                 self._print_and_say("Discarded episode", blocking=False)
                 if self._rerun:
                     self._rerun.log_episode_event("DISCARDED episode")
+        elif key == "p":
+            # Cycle to the next task prompt — only allowed while IDLE so each
+            # episode is recorded against exactly one prompt.
+            if (
+                self._episode_state.get_state() == self._episode_state.IDLE
+                and len(self._prompts) > 1
+            ):
+                self._prompt_idx = (self._prompt_idx + 1) % len(self._prompts)
+                new_prompt = self._prompts[self._prompt_idx]
+                self.data_exporter.task = new_prompt
+                self._print_and_say(
+                    f"Prompt {self._prompt_idx + 1} of {len(self._prompts)}: {new_prompt}",
+                    blocking=False,
+                )
+                if self._rerun:
+                    self._rerun.log_episode_event(f"PROMPT -> {new_prompt}")
 
     def _poll_sonic_zmq_messages(self):
         """Poll ZMQ for pose, planner, and manager_state messages (non-blocking)."""
@@ -536,6 +565,8 @@ class GrootDataCollector:
             self._manager_toggle_dc = True
         if self._extract_bool(data, "toggle_data_abort"):
             self._manager_toggle_da = True
+        if self._extract_bool(data, "toggle_prompt_switch"):
+            self._manager_toggle_prompt = True
 
     def _handle_planner_message(self, raw: bytes) -> None:
         try:
@@ -1150,6 +1181,18 @@ def main(config: SonicDataExporterConfig):
             else:
                 modality_config[key] = value
 
+    if config.prompt_file:
+        with open(config.prompt_file) as f:
+            prompts = json.load(f)
+        if not isinstance(prompts, list) or not all(isinstance(p, str) for p in prompts) or not prompts:
+            raise ValueError(
+                f"--prompt-file {config.prompt_file} must contain a non-empty JSON list of strings."
+            )
+        print(f"[Prompt] Loaded {len(prompts)} prompts from {config.prompt_file}")
+    else:
+        prompts = [config.task_prompt]
+    initial_task = prompts[0]
+
     text_to_speech = TextToSpeech() if config.text_to_speech else None
 
     robot_config = poll_robot_config_zmq(
@@ -1161,7 +1204,7 @@ def main(config: SonicDataExporterConfig):
         fps=config.data_collection_frequency,
         features=dataset_features,
         modality_config=modality_config,
-        task=config.task_prompt,
+        task=initial_task,
         script_config={**robot_config, "record_wrist_cameras": config.record_wrist_cameras},
     )
 
@@ -1186,6 +1229,7 @@ def main(config: SonicDataExporterConfig):
         head_zmq_host=config.head_zmq_host,
         head_zmq_port=config.head_zmq_port,
         rerun_logger=rerun_logger,
+        prompts=prompts,
     )
     data_collector.run()
 

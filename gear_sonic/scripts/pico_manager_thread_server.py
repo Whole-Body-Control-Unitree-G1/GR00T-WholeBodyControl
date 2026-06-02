@@ -1938,6 +1938,7 @@ def run_pico_manager(
     vr3pt_parent_mode = StreamMode.PLANNER
     prev_toggle_dc = False
     prev_toggle_da = False
+    prev_toggle_prompt = False
     try:
         prev_ax_pressed = False
         prev_by_pressed = False
@@ -2079,16 +2080,22 @@ def run_pico_manager(
             # Mode-independent: send manager_state for data exporter
             toggle_dc_tmp = bool(a_pressed) and left_grip_mgr > 0.5
             toggle_da_tmp = bool(b_pressed) and left_grip_mgr > 0.5
+            # Left grip + X = cycle task prompt (handled IDLE-only by data exporter).
+            # X alone is reserved by the A+X mode toggle, so require grip and no A.
+            toggle_prompt_tmp = bool(x_pressed) and not bool(a_pressed) and left_grip_mgr > 0.5
             toggle_dc = toggle_dc_tmp and not prev_toggle_dc
             toggle_da = toggle_da_tmp and not prev_toggle_da
+            toggle_prompt = toggle_prompt_tmp and not prev_toggle_prompt
             prev_toggle_dc = toggle_dc_tmp
             prev_toggle_da = toggle_da_tmp
+            prev_toggle_prompt = toggle_prompt_tmp
             socket.send(
                 pack_pose_message(
                     {
                         "stream_mode": np.array([current_mode.value], dtype=np.int32),
                         "toggle_data_collection": np.array([toggle_dc], dtype=bool),
                         "toggle_data_abort": np.array([toggle_da], dtype=bool),
+                        "toggle_prompt_switch": np.array([toggle_prompt], dtype=bool),
                     },
                     topic="manager_state",
                 )

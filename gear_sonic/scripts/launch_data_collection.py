@@ -132,6 +132,10 @@ class DataCollectionLaunchConfig:
     task_prompt: str = "demo"
     """Language task prompt for the data exporter."""
 
+    prompt_file: str = ""
+    """Path to a JSON file with a list of task prompts to cycle through with left grip + X
+    (only while IDLE). Empty = use --task-prompt only."""
+
     dataset_name: str = ""
     """Dataset name for the data exporter. Leave empty to auto-generate from timestamp."""
 
@@ -428,6 +432,8 @@ def main(config: DataCollectionLaunchConfig):
         f"--camera-host {config.camera_host} "
         f"--camera-port {config.camera_port}"
     )
+    if config.prompt_file:
+        exporter_cmd += f" --prompt-file '{config.prompt_file}'"
     if config.dataset_name:
         exporter_cmd += f" --dataset-name '{config.dataset_name}'"
     if config.record_wrist_cameras:
