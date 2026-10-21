@@ -53,6 +53,7 @@ def get_wbc_policy(
                 robot_model=robot_model,
                 config=gear_wbc_config,
                 model_path=wbc_config["model_path"],
+                stand_cmd_threshold=wbc_config.get("stand_cmd_threshold", 0.05),
             )
 
         wbc_policy = G1DecoupledWholeBodyPolicy(

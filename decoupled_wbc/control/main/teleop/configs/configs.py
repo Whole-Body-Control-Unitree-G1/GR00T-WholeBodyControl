@@ -49,6 +49,7 @@ def override_wbc_config(
         "enable_gravity_compensation": config.enable_gravity_compensation,
         "gravity_compensation_joints": config.gravity_compensation_joints,
         "high_elbow_pose": config.high_elbow_pose,
+        "stand_cmd_threshold": config.stand_cmd_threshold,
     }
 
     if missed_keys_only:
@@ -105,6 +106,13 @@ class BaseConfig(ArgsConfigTemplate):
     # Robot Configuration
     enable_waist: bool = False
     """Whether to include waist joints in IK."""
+
+    waist_location: Literal["", "lower_body", "upper_body", "lower_and_upper_body"] = ""
+    """Who drives the waist; empty = from enable_waist (lower_and_upper_body if set, else lower_body).
+    "upper_body" = waist from the upper-body targets only, legs-only lower body (MagicSim's HOMIE collection)."""
+
+    stand_cmd_threshold: float = 0.05
+    """Navigate-command norm below which the lower body runs the stand policy (MagicSim's HOMIE term: 0.1)."""
 
     with_hands: bool = True
     """Enable hand functionality. When False, robot operates without hands."""

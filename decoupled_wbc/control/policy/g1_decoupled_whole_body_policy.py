@@ -26,6 +26,9 @@ class G1DecoupledWholeBodyPolicy(Policy):
         self.upper_body_policy = upper_body_policy
         self.last_goal_time = time_module.monotonic()
         self.is_in_teleop_mode = False  # Track if lower body is in teleop mode
+        # goal["torso_orientation_rpy"], when a goal carries it: the lower body's torso command as given (MagicSim's
+        # HOMIE collection commands it from the planner), instead of the forward kinematics of the upper-body targets
+        self.torso_rpy_override = None
 
     def set_observation(self, observation):
         # Upper body policy is open loop (just interpolation), so we don't need to set the observation
@@ -42,9 +45,13 @@ class G1DecoupledWholeBodyPolicy(Policy):
             goal["interpolation_garbage_collection_time"]: Waypoints earlier than this time are removed
             goal["navigate_cmd"]: Target navigation velocities for the lower body policy
             goal["base_height_command"]: Target base height for both upper and lower body policies
+            goal["torso_orientation_rpy"]: Optional torso command for the lower body policy; replaces the one
+                computed from the upper-body targets while goals carry it
         """
         # Update goal timestamp for timeout safety
         self.last_goal_time = time_module.monotonic()
+        rpy_cmd = goal.get("torso_orientation_rpy")
+        self.torso_rpy_override = None if rpy_cmd is None else np.asarray(rpy_cmd, dtype=np.float64).reshape(3)
 
         upper_body_goal = {}
         lower_body_goal = {}
@@ -132,6 +139,8 @@ class G1DecoupledWholeBodyPolicy(Policy):
         waist_yaw_only_rotation = rpy.rpyToMatrix(0, 0, waist_yaw)
         yaw_only_waist_from_torso = waist_yaw_only_rotation.T @ torso_orientation
         torso_orientation_rpy = rpy.matrixToRpy(yaw_only_waist_from_torso)
+        if self.torso_rpy_override is not None:
+            torso_orientation_rpy = self.torso_rpy_override
 
         lower_body_action = self.lower_body_policy.get_action(
             time, q_arms, base_height_command, torso_orientation_rpy, interpolated_navigate_cmd

@@ -52,7 +52,9 @@ def main(config: ControlLoopConfig):
     # Initialize telemetry
     telemetry = Telemetry(window_size=100)
 
-    waist_location = "lower_and_upper_body" if config.enable_waist else "lower_body"
+    waist_location = config.waist_location or (
+        "lower_and_upper_body" if config.enable_waist else "lower_body"
+    )
     robot_model = instantiate_g1_robot_model(
         waist_location=waist_location, high_elbow_pose=config.high_elbow_pose
     )

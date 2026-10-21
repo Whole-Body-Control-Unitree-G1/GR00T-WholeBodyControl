@@ -13,13 +13,15 @@ from decoupled_wbc.control.utils.gear_wbc_utils import get_gravity_orientation, 
 class G1GearWbcPolicy(Policy):
     """Simple G1 robot policy using OpenGearWbc trained neural network."""
 
-    def __init__(self, robot_model, config: str, model_path: str):
+    def __init__(self, robot_model, config: str, model_path: str, stand_cmd_threshold: float = 0.05):
         """Initialize G1GearWbcPolicy.
 
         Args:
             config_path: Path to gear_wbc YAML configuration file
+            stand_cmd_threshold: navigate-command norm below which the stand policy runs
         """
         self.config, self.LEGGED_GYM_ROOT_DIR = load_config(config)
+        self.stand_cmd_threshold = stand_cmd_threshold
         self.robot_model = robot_model
         self.use_teleop_policy_cmd = False
 
@@ -220,7 +222,7 @@ class G1GearWbcPolicy(Policy):
         # Run policy inference
         with torch.no_grad():
             # Select appropriate policy based on command magnitude
-            if np.linalg.norm(self.cmd) < 0.05:
+            if np.linalg.norm(self.cmd) < self.stand_cmd_threshold:
                 # Use standing policy for small commands
                 policy = self.policy_1
             else:
