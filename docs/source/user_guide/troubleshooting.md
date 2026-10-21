@@ -111,6 +111,7 @@ not installed.
    |---|---|
    | x86_64 (Desktop) | **10.13** (required) |
    | Jetson / G1 onboard Orin | **10.7** (required; JetPack 6) |
+   | Jetson / G1 onboard Thor | **10.13** (required) |
 
 2. Extract and set the environment variable:
    ```bash
@@ -141,7 +142,10 @@ python gear_sonic/train_agent_trl.py \
 For quick testing, download the sample data from HuggingFace:
 
 ```bash
-hf download nvidia/GEAR-SONIC --include "sample_data/*" --local-dir .
+hf download nvidia/GEAR-SONIC \
+    --include "config.json" \
+    --include "sample_data/*" \
+    --local-dir .
 ```
 
 ---
@@ -203,12 +207,14 @@ without errors but outputs incorrect actions.
 |---|---|
 | x86_64 (Desktop) | **TensorRT 10.13** |
 | Jetson / G1 onboard Orin | **TensorRT 10.7** (JetPack 6) |
+| Jetson / G1 onboard Thor | **TensorRT 10.13** |
 
 Verify your version:
 
 ```bash
 echo $TensorRT_ROOT
-ls $TensorRT_ROOT/lib/libnvinfer.so*
+find -L "$TensorRT_ROOT/lib" "$TensorRT_ROOT/lib/aarch64-linux-gnu" \
+    -maxdepth 1 -name 'libnvinfer.so*' -print 2>/dev/null
 ```
 
 If the version is wrong, download the correct one from
@@ -270,6 +276,22 @@ export __GLX_VENDOR_LIBRARY_NAME=nvidia
 
 Or run with `--gpus all -e DISPLAY=$DISPLAY` in your Docker run command. See
 [#25](https://github.com/NVlabs/GR00T-WholeBodyControl/issues/25) for details.
+
+---
+
+## 13. `deploy.sh` fails to bind ZMQ port 5557 on Orin
+
+**Symptom:** `deploy.sh` exits with a ZMQ bind error on port 5557.
+
+**Cause:** A Unitree system service (`iphone_server.service`) is already listening on port 5557.
+
+**Fix:**
+
+```bash
+sudo systemctl stop iphone_server.service
+```
+
+Then re-run the deployment. The service restarts on the next boot; to keep it stopped across reboots use `sudo systemctl disable iphone_server.service`.
 
 ---
 
