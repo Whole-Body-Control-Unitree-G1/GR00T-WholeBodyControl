@@ -21,7 +21,7 @@ class Dex1GripperSender:
         self._pub.Init()
         self._cmd = MotorCmds_(cmds=[unitree_go_msg_dds__MotorCmd_()])
         self._cmd.cmds[0].kp = 5.0
-        self._cmd.cmds[0].kd = 0.05
+        self._cmd.cmds[0].kd = 0.2
 
     def send(self, position: float):
         """Send a position command in radians, clamped to [0, MAX_GRIPPER_ANGLE]."""

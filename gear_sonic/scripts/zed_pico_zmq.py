@@ -25,14 +25,13 @@ pico_lock = threading.Lock()
 
 
 def parse_open_camera(data: bytes) -> str | None:
-    """Extract PICO IP from OPEN_CAMERA packet. IP is a length-prefixed string at the end."""
-    try:
-        ip_len = data[-len('192.168.36.236') - 1]
-        ip = data[-(ip_len):].decode()
-        return ip
-    except Exception as e:
-        print(f'[CMD] Failed to parse IP: {e}')
-        return None
+    """Extract PICO IP from OPEN_CAMERA packet by scanning for an IPv4 pattern."""
+    import re
+    match = re.search(rb'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', data)
+    if match:
+        return match.group(1).decode('ascii')
+    print(f'[CMD] Failed to parse IP: no IPv4 pattern found in packet (raw: {data!r})')
+    return None
 
 
 def command_server():
