@@ -74,6 +74,90 @@ See [Data Collection](data_collection.md) for camera server setup.
 
 The `gear_sonic_deploy` binary must be built. See the main README.
 
+### SONIC v1.1 Checkpoint
+
+Use the `sonic_v1_1/` checkpoint when the VLA policy was trained against
+the robot-heading-normalized SONIC controller. It uses a 10-frame SMPL/wrist
+reference horizon and was trained with wrist-pose augmentation. It is not the
+low-latency checkpoint.
+
+```bash
+python download_from_hf.py --sonic-v1-1
+```
+
+Launch the matching C++ controller:
+
+```bash
+cd gear_sonic_deploy
+./deploy.sh \
+    --cp policy/sonic_v1_1/model \
+    --obs-config policy/sonic_v1_1/observation_config.yaml \
+    --input-type zmq_manager \
+    --motor-kp-scale 4,10=1.5 \
+    --motor-kd-scale 4,10=1.5 \
+    real
+```
+
+This v1.1 tuning scales the left and right ankle-pitch motors (hardware
+indices `4` and `10`). The resulting whole-body stability improves observed
+wrist tracking; it does not directly scale the wrist motors.
+
+Or pass the same model pair to the Python launcher:
+
+```bash
+python gear_sonic/scripts/launch_inference.py \
+    --deploy-checkpoint policy/sonic_v1_1/model \
+    --deploy-obs-config policy/sonic_v1_1/observation_config.yaml \
+    --deploy-motor-kp-scale 4,10=1.5 \
+    --deploy-motor-kd-scale 4,10=1.5 \
+    --camera-host 192.168.123.164 \
+    --prompt "pick up the cup"
+```
+
+### Low-Latency Teleoperation Checkpoint
+
+The `low_latency/` checkpoint is configured for responsive whole-body
+teleoperation. Its SMPL encoder uses 4 future reference frames at 50 Hz
+(approximately 80 ms of reference lookahead), compared with 10 frames
+(approximately 200 ms) in the default release. This is reference lookahead,
+not total end-to-end system latency.
+
+Download the deployment files from Hugging Face:
+
+```bash
+python download_from_hf.py --low-latency
+```
+
+Then launch `gear_sonic_deploy` with the low-latency model prefix and matching
+observation config:
+
+**C++ deploy:**
+
+```bash
+cd gear_sonic_deploy
+./deploy.sh \
+    --cp policy/low_latency/model \
+    --obs-config policy/low_latency/observation_config.yaml \
+    --input-type zmq_manager \
+    real
+```
+
+For simulation, replace `real` with `sim`. The `--cp` value is a model prefix:
+`deploy.sh` appends `_encoder.onnx` and `_decoder.onnx` internally.
+
+**Python launcher:**
+
+```bash
+python gear_sonic/scripts/launch_inference.py \
+    --deploy-checkpoint policy/low_latency/model \
+    --deploy-obs-config policy/low_latency/observation_config.yaml \
+    --camera-host 192.168.123.164 \
+    --prompt "pick up the cup"
+```
+
+The Python launcher starts the same C++ deploy command in a tmux pane, then runs
+the Python VLA inference client, keyboard publisher, and optional data exporter.
+
 ## Action Space
 
 The Sonic embodiment (`unitree_g1_sonic`) uses a 78-dimensional action
@@ -115,7 +199,7 @@ Type these keys in the **Keyboard Publisher** pane (pane 1):
 | Key | Action |
 |-----|--------|
 | `k` | Start / stop the C++ control loop |
-| `i` | Send initial pose and switch to POSE mode |
+| `i` | Blend smoothly to initial pose and switch to POSE mode |
 | `p` | Pause / resume policy inference |
 | `[` | Toggle left hand open/closed (initial pose) |
 | `]` | Toggle right hand open/closed (initial pose) |
@@ -130,11 +214,10 @@ Type these keys in the **Keyboard Publisher** pane (pane 1):
 2. Click on **pane 0** (C++ Deploy) and press Enter to confirm deployment
 3. Switch to **pane 1** (Keyboard Publisher)
 4. Press `k` to start the C++ control loop (starts in PLANNER mode)
-5. Press `i` to send the initial pose (switches to POSE mode)
-   > **Note:** The initial motion token in `gear_sonic/utils/inference/initial_poses.py`
-   > is specific to the SONIC checkpoint used during training. If you change the
-   > SONIC checkpoint, you must update `LATENT_INITIAL_MOTION_TOKEN` to a safe
-   > standing pose from the new checkpoint's latent space.
+5. Press `i` to blend to the initial pose (switches to POSE mode)
+   > The robot smoothly interpolates to the initial pose over 1 second. If your
+   > task starts from a different pose than the default, see
+   > [Customizing the Initial Pose](#customizing-the-initial-pose) below.
 6. Press `p` to unpause the inference loop
 7. The robot will begin executing VLA-predicted actions
 8. Press `p` to pause, `k` to stop the control loop when done
@@ -159,6 +242,27 @@ uv run python gr00t/eval/run_gr00t_server.py \
 ```bash
 cd gear_sonic_deploy
 ./deploy.sh --input-type zmq_manager real
+```
+
+Low-latency variant:
+
+```bash
+python gear_sonic/scripts/launch_inference.py \
+    --deploy-checkpoint policy/low_latency/model \
+    --deploy-obs-config policy/low_latency/observation_config.yaml \
+    --camera-host 192.168.123.164 \
+    --prompt "pick up the apple"
+```
+
+Manual C++ deploy equivalent:
+
+```bash
+cd gear_sonic_deploy
+./deploy.sh \
+    --cp policy/low_latency/model \
+    --obs-config policy/low_latency/observation_config.yaml \
+    --input-type zmq_manager \
+    real
 ```
 
 ### Terminal 3 — VLA Inference
@@ -197,11 +301,14 @@ python gear_sonic/scripts/run_data_exporter.py \
 | `--rate` | `2.5` | Inference rate (Hz) |
 | `--camera-host` | `localhost` | Camera server host |
 | `--camera-port` | `5555` | Camera server port |
+| `--initial-pose-blend-duration` | `1.0` | Seconds to blend to initial pose (0 = instant snap) |
 | `--verbose-timing` | `false` | Always print loop timing |
 
 ### tmux Launcher (`launch_inference.py`)
 
 The launcher exposes all the above flags plus deploy and data exporter options.
+Use `--deploy-motor-kp-scale` and `--deploy-motor-kd-scale` to forward hardware
+gain specifications to the C++ controller.
 Run `python gear_sonic/scripts/launch_inference.py --help` for the full list.
 
 ## Remote PolicyServer
@@ -226,3 +333,64 @@ When a new action chunk arrives, the system calculates how many actions in the
 chunk are already "stale" based on the time elapsed since inference started,
 and skips to the appropriate action index. This is controlled by `--action-publish-rate`
 and `--action-horizon`.
+
+## Customizing the Initial Pose
+
+When you press `i`, the inference client blends the robot smoothly from its
+current configuration to a predefined **initial pose** encoded as a 64-dim
+latent motion token. This pose should match the starting configuration your
+demonstrations typically begin from.
+
+### When to Change the Initial Pose
+
+You should update the initial motion token if:
+
+- Your collected demonstrations start from a pose far from the default
+  (e.g., arms raised, holding an object, or a different standing stance)
+- You switch to a different SONIC checkpoint (each checkpoint has its own
+  latent space — the same token produces different poses across checkpoints)
+- The robot is snapping to a dangerous or unstable configuration on `i` press
+
+### Where to Change It
+
+Edit `gear_sonic/utils/inference/initial_poses.py`:
+
+```python
+LATENT_INITIAL_MOTION_TOKEN = np.array(
+    [
+        # Replace with your 64-dim token
+        ...
+    ],
+    dtype=np.float32,
+)
+```
+
+### How to Find a Good Token
+
+1. **From data collection:** Look at the first action frame of a good demonstration
+   episode. The `action.motion_token` column in the parquet file at `frame_index=0`
+   gives you the latent token for that pose.
+
+2. **From the C++ deploy:** Put the robot in the desired starting pose via teleop,
+   then read the most recent latent token published on the ZMQ action channel.
+
+### Blend Duration
+
+The blend duration controls how quickly the robot transitions to the initial pose:
+
+```bash
+# Default: 1 second smooth blend
+python gear_sonic/scripts/run_vla_inference.py --initial-pose-blend-duration 1.0
+
+# Faster blend (0.5 seconds)
+python gear_sonic/scripts/run_vla_inference.py --initial-pose-blend-duration 0.5
+
+# Instant snap (no interpolation, legacy behavior)
+python gear_sonic/scripts/run_vla_inference.py --initial-pose-blend-duration 0
+```
+
+```{warning}
+Setting `--initial-pose-blend-duration` too low (or to 0) can cause jerky motion,
+especially if the robot's current pose is far from the initial pose. The default
+1-second blend is safe for most configurations.
+```
