@@ -251,6 +251,22 @@ class TeleopConfig(BaseConfig):
     teleop_frequency: float = 20  # Override to be float instead of int
     """Frequency of the teleop loop."""
 
+    pico_head_tracking: bool = False
+    """PICO only: the robot head (head_control_node, head/target) follows the headset, relative to a zero pose taken on
+    the first frame and on every right stick click; the arm targets then keep that calibrated heading instead
+    of turning with the headset."""
+
+    pico_pause_home: bool = False
+    """PICO only: teleop paused (left menu + right trigger) = the arms go back to the startup pose over
+    home_seconds, the grippers open, the head levels, and the height and grippers ignore the controllers; the
+    joysticks still walk the robot. Each activation then blends into the teleop targets over home_seconds / 3."""
+
+    home_seconds: float = 3.0
+    """Duration of the move to the startup pose on pause (pico_pause_home)."""
+
+    pico_base_height: float = 0.74
+    """PICO only: base height command at startup (X / Y change it while active)."""
+
     binary_hand_ik: bool = True
     """Whether to use binary IK."""
 

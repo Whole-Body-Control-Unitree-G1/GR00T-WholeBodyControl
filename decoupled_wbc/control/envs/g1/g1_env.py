@@ -257,8 +257,8 @@ class G1Env(HumanoidEnv):
             self.hands().right.queue_action({"hand_q": right_hand_actuator_q})
 
         if self.with_dex1_grippers:
-            self._left_gripper.queue_action({"gripper_q": action.get("left_gripper_cmd", 0.0)})
-            self._right_gripper.queue_action({"gripper_q": action.get("right_gripper_cmd", 0.0)})
+            self._left_gripper.queue_action({"gripper_q": action.get("left_gripper_cmd", 5.5)})  # Dex1 5.5 rad = open
+            self._right_gripper.queue_action({"gripper_q": action.get("right_gripper_cmd", 5.5)})  # Dex1 5.5 rad = open
 
     def action_space(self) -> gym.Space:
         return gym.spaces.Box(low=-np.inf, high=np.inf, shape=(self.robot_model.num_dofs,))

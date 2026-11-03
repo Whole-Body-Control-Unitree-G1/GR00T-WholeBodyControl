@@ -179,7 +179,7 @@ class Dex1CommandSender:
 
         #Might have to tune
         self.kp = 5.0
-        self.kd = 0.05
+        self.kd = 0.2  # 0.05 buzzes against the end stops; robot_web.py uses 0.2
 
     def send_command(self, cmd : float):
         """

@@ -31,6 +31,7 @@ class TeleopPolicy(Policy):
         replay_speed: float = 1.0,
         wait_for_activation: int = 5,
         activate_keyboard_listener: bool = True,
+        pico_head_tracking: bool = False,
     ):
         if activate_keyboard_listener:
             from decoupled_wbc.control.utils.keyboard_dispatcher import KeyboardListenerSubscriber
@@ -50,6 +51,7 @@ class TeleopPolicy(Policy):
             body_streamer_keyword=body_streamer_keyword,
             replay_data_path=replay_data_path,
             replay_speed=replay_speed,
+            pico_head_tracking=pico_head_tracking,
         )
         self.robot_model = robot_model
         self.retargeting_ik = retargeting_ik

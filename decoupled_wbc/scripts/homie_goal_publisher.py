@@ -53,8 +53,8 @@ class Args:
     """Seconds to stand after activation (and band release) before replaying."""
     hold_end: float = 3.0
     """Seconds to hold the last pose with zero velocity after the episode."""
-    gripper_close: float = 5.5
-    """Real Dex1 gripper angle for the binary "close" command (0 = open)."""
+    gripper_open: float = 5.5
+    """Real Dex1 gripper angle when fully open (0 = closed; checked on the robot 2026-10-21)."""
     max_vx: float = 0.3
     max_vy: float = 0.2
     max_wz: float = 0.4
@@ -74,7 +74,8 @@ def load_episode(args: Args):
     cmd[:, 2] = cmd[:, 2].clip(-args.max_wz, args.max_wz)
     cmd[:, 3] = cmd[:, 3].clip(args.min_height, args.max_height)
     cmd[:, 4:7] = cmd[:, 4:7].clip(-args.max_torso, args.max_torso)
-    grippers = action[:, [col["left_gripper"], col["right_gripper"]]] * args.gripper_close
+    # dataset command 0 = open, 1 = close; Dex1 angle 5.5 rad = open, 0 = closed
+    grippers = (1.0 - action[:, [col["left_gripper"], col["right_gripper"]]]) * args.gripper_open
     return names, col, action, cmd, grippers, pelvis
 
 

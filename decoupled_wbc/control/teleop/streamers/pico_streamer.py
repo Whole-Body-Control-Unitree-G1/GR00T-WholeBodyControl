@@ -17,7 +17,12 @@ R_HEADSET_TO_WORLD = np.array(
 
 
 class PicoStreamer(BaseStreamer):
-    def __init__(self):
+    def __init__(self, head_tracking: bool = False):
+        # head_tracking: also stream the headset's rotation relative to a zero pose (first frame, right stick click)
+        # for the robot head, and keep the arm targets in that calibrated heading instead of the live headset yaw
+        self.head_tracking = head_tracking
+        self.head_zero = None  # headset rotation (z-up world) at the last calibration
+        self.right_menu_last = False
         self.xr_client = XrClient()
         self.run_pico_service()
 
@@ -86,6 +91,13 @@ class PicoStreamer(BaseStreamer):
         pico_data["left_axis_click"] = self.xr_client.get_button_state_by_name("left_axis_click")
         pico_data["right_axis_click"] = self.xr_client.get_button_state_by_name("right_axis_click")
 
+        # log every button change (not the triggers / grips, used all the time), to see what the PICO sends
+        pressed = {k for k in ("A", "B", "X", "Y", "left_menu_button", "right_menu_button", "left_axis_click",
+                               "right_axis_click") if pico_data[k]}
+        if pressed != getattr(self, "pressed_last", set()):
+            print(f"[PicoStreamer] pressed: {', '.join(sorted(pressed)) or '-'}", flush=True)
+            self.pressed_last = pressed
+
         # Get the timestamp of the left and right controllers
         pico_data["timestamp"] = self.xr_client.get_timestamp_ns()
 
@@ -105,7 +117,26 @@ class PicoStreamer(BaseStreamer):
 
         return pico_data
 
+    def _headset_rotation(self, pico_data) -> np.ndarray:
+        quat = np.array(pico_data["head_pose"])[3:]  # x, y, z, w
+        if np.allclose(quat, 0):
+            quat = np.array([0, 0, 0, 1])
+        return R_HEADSET_TO_WORLD @ R.from_quat(quat).as_matrix() @ R_HEADSET_TO_WORLD.T  # y up -> z up
+
+    def _head_tracking(self, pico_data):
+        """(yaw, pitch) of the headset relative to the zero pose: yaw + = left, pitch + = down (rad)."""
+        rot = self._headset_rotation(pico_data)
+        # the right stick click (the PICO's right controller has no menu button that XRoboToolkit reports)
+        pressed = bool(pico_data["right_axis_click"] or pico_data["right_menu_button"])
+        if self.head_zero is None or (pressed and not self.right_menu_last):
+            self.head_zero = rot
+            print("[PicoStreamer] head zero pose calibrated (look straight ahead, click the right stick to redo)")
+        self.right_menu_last = pressed
+        forward = (self.head_zero.T @ rot) @ np.array([1.0, 0.0, 0.0])  # headset forward in the zero frame
+        return float(np.arctan2(forward[1], forward[0])), float(np.arcsin(np.clip(-forward[2], -1.0, 1.0)))
+
     def _generate_unified_raw_data(self, pico_data):
+        head_rel = self._head_tracking(pico_data) if self.head_tracking else None
         # Get controller position and orientation in z up world frame
         left_controller_T = self._process_xr_pose(pico_data["left_pose"], pico_data["head_pose"])
         right_controller_T = self._process_xr_pose(pico_data["right_pose"], pico_data["head_pose"])
@@ -137,11 +168,12 @@ class PicoStreamer(BaseStreamer):
 
         MAX_GRIPPER_ANGLE = 5.5  # rad, based on dex1_1 test script range
         if not pico_data["left_menu_button"]:
-            left_gripper_cmd = pico_data["left_trigger"] * MAX_GRIPPER_ANGLE
-            right_gripper_cmd = pico_data["right_trigger"] * MAX_GRIPPER_ANGLE
-        else:
-            left_gripper_cmd = 0.0
-            right_gripper_cmd = 0.0
+            # Dex1: MAX_GRIPPER_ANGLE = open, 0 = closed (checked on the robot 2026-10-21): pressing closes
+            left_gripper_cmd = (1.0 - pico_data["left_trigger"]) * MAX_GRIPPER_ANGLE
+            right_gripper_cmd = (1.0 - pico_data["right_trigger"]) * MAX_GRIPPER_ANGLE
+        else:  # menu held (activation combos): keep the grippers open (0 would close them)
+            left_gripper_cmd = MAX_GRIPPER_ANGLE
+            right_gripper_cmd = MAX_GRIPPER_ANGLE
 
         # Get activation commands
         toggle_policy_action_tmp = pico_data["left_menu_button"] and (
@@ -192,6 +224,7 @@ class PicoStreamer(BaseStreamer):
                 "toggle_policy_action": toggle_policy_action,
                 "left_gripper_cmd": left_gripper_cmd,
                 "right_gripper_cmd": right_gripper_cmd,
+                **({"head_rel_yaw_pitch": head_rel} if head_rel is not None else {}),
             },
             teleop_data={
                 "toggle_activation": toggle_activation,
@@ -232,8 +265,12 @@ class PicoStreamer(BaseStreamer):
         # Calculate the delta between the controller and headset positions
         xr_pose_xyz_delta = xr_pose_xyz - headset_pose_xyz
 
-        # Calculate the yaw of the headset
-        R_headset_to_world = R.from_matrix(headset_pose_rotation)
+        # Calculate the yaw of the headset; with head tracking the calibrated heading instead, so turning the head
+        # (which now turns the robot head) does not swing the arm targets
+        if self.head_tracking and self.head_zero is not None:
+            R_headset_to_world = R.from_matrix(self.head_zero)
+        else:
+            R_headset_to_world = R.from_matrix(headset_pose_rotation)
         headset_pose_yaw = R_headset_to_world.as_euler("xyz")[2]  # Extract yaw (Z-axis rotation)
         inverse_yaw_rotation = R.from_euler("z", -headset_pose_yaw).as_matrix()
 

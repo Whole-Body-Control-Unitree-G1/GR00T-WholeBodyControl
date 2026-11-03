@@ -221,3 +221,10 @@ sample_data/
 sonic_release/
 
 graphify-out/
+
+# core dumps of crashed processes (written to their working directory)
+/core
+
+# local camera recordings and Python caches
+camera_recordings/
+__pycache__/

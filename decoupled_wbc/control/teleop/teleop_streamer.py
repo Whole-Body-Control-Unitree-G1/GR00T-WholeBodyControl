@@ -19,6 +19,7 @@ class TeleopStreamer:
         body_streamer_keyword="",
         replay_data_path: Optional[str] = None,
         replay_speed: float = 1.0,
+        pico_head_tracking: bool = False,
     ):
         # initialize the body
         self.body = robot_model
@@ -31,6 +32,7 @@ class TeleopStreamer:
 
         # enable real robot and devices
         self.enable_real_device = enable_real_device
+        self.pico_head_tracking = pico_head_tracking
         if self.enable_real_device:
             if body_control_device == "vive":
                 from decoupled_wbc.control.teleop.streamers.vive_streamer import ViveStreamer
@@ -60,7 +62,7 @@ class TeleopStreamer:
             elif body_control_device == "pico":
                 from decoupled_wbc.control.teleop.streamers.pico_streamer import PicoStreamer
 
-                self.body_streamer = PicoStreamer()
+                self.body_streamer = PicoStreamer(head_tracking=self.pico_head_tracking)
                 self.body_streamer.start_streaming()
             elif body_control_device == "dummy":
                 from decoupled_wbc.control.teleop.streamers.dummy_streamer import DummyStreamer
