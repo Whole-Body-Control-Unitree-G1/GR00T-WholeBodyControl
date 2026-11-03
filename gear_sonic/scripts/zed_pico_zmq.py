@@ -1,8 +1,10 @@
 """Standalone script: subscribes to ZMQ camera frames and streams to PICO via TCP."""
 
 import argparse
+import fcntl
 import socket
 import struct
+import termios
 import threading
 import time
 
@@ -18,6 +20,9 @@ COMMAND_PORT = 13579
 CAMERA_PORT  = 12345
 BITRATE      = 4_000_000
 FPS          = 60
+# A frame is skipped (not encoded) while more than this many bytes still wait in the socket to the PICO: a slow wifi
+# link then lowers the frame rate instead of building up seconds of lag in the send queue.
+MAX_BACKLOG  = 64_000
 
 # Set by command handler when PICO sends OPEN_CAMERA
 pico_ip   = None
@@ -64,13 +69,13 @@ def command_server():
         conn.close()
 
 
-def init_encoder(w, h):
+def init_encoder(w, h, fps=FPS, bitrate=BITRATE):
     container = av.open('/dev/null', 'w', format='null')
-    stream = container.add_stream('libx264', rate=FPS)
+    stream = container.add_stream('libx264', rate=fps)
     stream.width = w
     stream.height = h
     stream.pix_fmt = 'yuv420p'
-    stream.bit_rate = BITRATE
+    stream.bit_rate = bitrate
     stream.options = {
         'preset': 'ultrafast',
         'tune': 'zerolatency',
@@ -82,6 +87,9 @@ def init_encoder(w, h):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--zmq-host', default='192.168.123.164', help='ZMQ camera bridge host (robot IP)')
+    parser.add_argument('--fps', type=int, default=FPS,
+                        help='the ZED stereo rate; the encoder spreads --bitrate over this many frames per second')
+    parser.add_argument('--bitrate', type=int, default=BITRATE, help='H.264 bitrate (bit/s)')
     args = parser.parse_args()
 
     global pico_ip
@@ -98,6 +106,7 @@ def main():
     container = None
     stream    = None
     cam_sock  = None
+    sent, skipped, last_report = 0, 0, time.monotonic()
 
     while True:
         raw = sock.recv()
@@ -112,6 +121,8 @@ def main():
         if cam_sock is None:
             try:
                 cam_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                cam_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)  # send each frame at once
+                cam_sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * MAX_BACKLOG)  # no deep queue
                 cam_sock.connect((ip, CAMERA_PORT))
                 print(f'Connected to PICO camera at {ip}:{CAMERA_PORT}')
             except Exception as e:
@@ -119,6 +130,12 @@ def main():
                 cam_sock = None
                 time.sleep(1)
                 continue
+
+        # the wifi to the PICO is behind: drop this frame rather than queue it (queued frames = lag)
+        backlog = struct.unpack('i', fcntl.ioctl(cam_sock.fileno(), termios.TIOCOUTQ, b'\0' * 4))[0]
+        if backlog > MAX_BACKLOG:
+            skipped += 1
+            continue
 
         data = msgpack.unpackb(raw, raw=False)
         jpg_bytes = data['images'][CAMERA_KEY]
@@ -128,12 +145,18 @@ def main():
 
         h, w = frame_bgr.shape[:2]
         if stream is None:
-            container, stream = init_encoder(w, h)
-            print(f'Encoder initialized: {w}x{h} @ {FPS}fps')
+            container, stream = init_encoder(w, h, args.fps, args.bitrate)
+            print(f'Encoder initialized: {w}x{h} @ {args.fps}fps, {args.bitrate / 1e6:.1f} Mbit/s')
 
-        frame_rgb = frame_bgr[..., ::-1]
-        av_frame  = av.VideoFrame.from_ndarray(frame_rgb, format='rgb24')
-        av_frame  = av_frame.reformat(format='yuv420p')
+        # BGR -> I420 in one OpenCV call (~2 ms at 2560x720; the rgb24 -> yuv420p reformat took ~25 ms, so the loop
+        # fell behind the camera)
+        yuv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2YUV_I420)
+        av_frame = av.VideoFrame.from_ndarray(yuv, format='yuv420p')
+
+        sent += 1
+        if time.monotonic() - last_report > 10.0:
+            print(f'{sent / (time.monotonic() - last_report):.1f} fps sent, {skipped} frames skipped (wifi behind)')
+            sent, skipped, last_report = 0, 0, time.monotonic()
 
         for packet in stream.encode(av_frame):
             data_bytes = bytes(packet)
