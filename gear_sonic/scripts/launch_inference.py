@@ -126,6 +126,10 @@ class InferenceLaunchConfig:
     policy_port: int = 5550
     """Isaac-GR00T PolicyServer port."""
 
+    inference_script: str = "gear_sonic/scripts/run_vla_inference.py"
+    """Inference client: run_vla_inference.py (GR00T PolicyServer) or run_pi05_inference.py (openpi pi0.5 server,
+    --policy-port 8000)."""
+
     embodiment_tag: str = "unitree_g1_sonic"
     """Embodiment tag for policy inference."""
 
@@ -135,8 +139,14 @@ class InferenceLaunchConfig:
     action_publish_rate: int = 50
     """Rate at which individual actions are published to the C++ control loop (Hz)."""
 
-    action_horizon: int = 40
+    action_horizon: int = 50
     """Action horizon of the VLA policy."""
+
+    rtc: bool = True
+    """Real-time chunking in run_vla_inference.py (--no-rtc = timer-based requests)."""
+
+    execute_steps: int = 25
+    """With --rtc: steps of each chunk executed before the next chunk takes over."""
 
     # Camera
     camera_host: str = "localhost"
@@ -168,6 +178,20 @@ class InferenceLaunchConfig:
     # 2-DOF head
     with_head: bool = False
     """Enable 2-DOF head control (requires bridge_node running on robot)."""
+
+    # Orin side (as launch_data_collection.py --with-robot)
+    with_robot: bool = False
+    """Start the Orin processes over ssh in a 'robot' window: Dex1 gripper server (type the sudo password there),
+    cameras, camera bridge, head_control_node and head_pico_bridge (which takes head_cmd from this laptop)."""
+
+    robot_ssh: str = "unitree@192.168.123.164"
+    """ssh target of the Orin (key-based login)."""
+
+    laptop_interface: str = "enp0s31f6"
+    """Laptop port on the robot network; head_pico_bridge reads head_cmd (:5556) from its IP."""
+
+    orin_interface: str = "enP8p1s0"
+    """Orin port on the robot network (gripper server and head ROS 2 traffic)."""
 
 
 SESSION_NAME = "sonic_inference"
@@ -296,6 +320,16 @@ def main(config: InferenceLaunchConfig):
     _create_tmux_session()
     print(f"Created tmux session: {SESSION_NAME}")
 
+    # --- Window 'robot' (--with-robot): the Orin side, started first so the cameras warm up ---
+    if config.with_robot:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import launch_data_collection as ldc
+
+        ldc.SESSION_NAME = SESSION_NAME  # its robot-window helpers address panes by this session name
+        ldc._create_robot_window(5)
+        ldc._start_robot(config)
+        subprocess.run(["tmux", "select-window", "-t", f"{SESSION_NAME}:inference"])
+
     # --- Window 1 (sim only): MuJoCo Simulator ---
     if config.sim:
         subprocess.run(
@@ -401,13 +435,15 @@ def main(config: InferenceLaunchConfig):
     inference_cmd = (
         f"cd {repo_root} && "
         f"source .venv_inference/bin/activate && "
-        f"python gear_sonic/scripts/run_vla_inference.py "
+        f"python {config.inference_script} "
         f"--host {config.policy_host} "
         f"--port {config.policy_port} "
         f"--embodiment-tag {config.embodiment_tag} "
         f"--prompt '{config.prompt}' "
         f"--action-publish-rate {config.action_publish_rate} "
         f"--action-horizon {config.action_horizon} "
+        f"{'--rtc' if config.rtc else '--no-rtc'} "
+        f"--execute-steps {config.execute_steps} "
         f"--camera-host {config.camera_host} "
         f"--camera-port {config.camera_port}"
     )

@@ -80,11 +80,27 @@ class InferenceConfig:
     action_publish_rate: int = 50
     """Rate at which individual actions are published to the C++ control loop (Hz)."""
 
-    action_horizon: int = 40
+    action_horizon: int = 50
     """Action horizon of the VLA policy (number of future actions per inference)."""
 
+    policy_fps: float = 50.0
+    """Rate of the policy's action rows (the training data's fps). Rows are published at --action-publish-rate: at a
+    lower policy_fps each row is held until the next one is due (row = time in chunk x policy_fps)."""
+
     rate: float = 1 / 0.4
-    """Rate at which we run the forward pass of the VLA policy (Hz)."""
+    """Rate at which we run the forward pass of the VLA policy (Hz). Only used with --no-rtc."""
+
+    rtc: bool = True
+    """Real-time chunking: each request tells the server how far the previous chunk has run, and the server
+    inpaints the new chunk's start from the rest of it (Isaac-GR00T Gr00tPolicy rtc_* options). --no-rtc = the
+    old timer-based requests at --rate."""
+
+    execute_steps: int = 25
+    """With --rtc: chunk rows executed before the next chunk takes over. The request goes out earlier by the
+    measured inference latency, so the new chunk arrives around this row."""
+
+    rtc_ramp_rate: float = 3.0
+    """With --rtc: how fast the pull toward the previous chunk fades over the overlap (higher = fades sooner)."""
 
     # Camera
     camera_host: str = "localhost"
@@ -101,8 +117,10 @@ class InferenceConfig:
     """ZMQ port for robot state (same socket as robot_config topic)."""
 
     # ZMQ: Action output (latent actions to C++ control loop)
-    action_zmq_host: str = "localhost"
-    """ZMQ host for action output (PUB socket)."""
+    action_zmq_host: str = "*"
+    """ZMQ bind address for action output (PUB socket). "*" (all interfaces, as pico_manager_thread_server binds it)
+    so the Orin's head_pico_bridge can read head_cmd from the laptop's robot-network IP; "localhost" reaches only
+    the C++ deploy."""
 
     action_zmq_port: int = 5556
     """ZMQ port for action output."""
@@ -300,7 +318,7 @@ def prepare_observation_from_sensors(
     if "left_wrist" in camera_msg["images"]:
         video["left_wrist"] = camera_msg["images"]["left_wrist"][np.newaxis, np.newaxis]
     if "right_wrist" in camera_msg["images"]:
-        video["wrist_view"] = camera_msg["images"]["right_wrist"][np.newaxis, np.newaxis]
+        video["right_wrist"] = camera_msg["images"]["right_wrist"][np.newaxis, np.newaxis]
 
     observation = {
         "video": video,
@@ -357,14 +375,14 @@ def prepare_observation_from_sensors(
     return observation
 
 
-def run_policy_inference_and_process(policy, observation, robot_model):
+def run_policy_inference_and_process(policy, observation, robot_model, options=None):
     """Run policy inference via Isaac-GR00T PolicyClient and process results.
 
     Returns:
         processed_action dict or None on error.
     """
     try:
-        action, _info = policy.get_action(observation)
+        action, _info = policy.get_action(observation, options)
 
         action.pop("task_progress", None)
         action.pop("action.task_progress", None)
@@ -396,11 +414,11 @@ def _inference_worker_loop(
     prepare_obs_fn,
     inference_fn,
 ):
-    """Persistent worker thread for async inference."""
+    """Persistent worker thread for async inference. Queue items are the request's policy options (or None)."""
     while not stop_event.is_set():
         try:
             try:
-                inference_queue.get(timeout=0.1)
+                options = inference_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
 
@@ -412,7 +430,7 @@ def _inference_worker_loop(
                     continue
 
                 inference_start_time = time.monotonic()
-                processed_action = inference_fn(observation)
+                processed_action = inference_fn(observation, options)
 
                 if processed_action is not None:
                     try:
@@ -444,7 +462,10 @@ def _compute_closed_hand_joints(side: str) -> np.ndarray:
     return solver._get_middle_close_q_desired().astype(np.float32)
 
 
-def main(config: InferenceConfig):
+def main(config: InferenceConfig, policy=None, observation_transform=None):
+    """Run the inference loop. ``policy`` replaces the Isaac-GR00T PolicyClient (any object with ``ping()`` and
+    ``get_action(observation, options) -> (action_dict, info)``); ``observation_transform`` maps the observation
+    built here to that policy's format (see run_pi05_inference.py)."""
     pause_loop = True
 
     if config.with_dex1_grippers:
@@ -478,10 +499,13 @@ def main(config: InferenceConfig):
 
     robot_model = instantiate_g1_robot_model(waist_location="lower_and_upper_body")
 
-    # Isaac-GR00T PolicyClient
-    from gr00t.policy.server_client import PolicyClient
+    if policy is not None:
+        n1_policy = policy
+    else:
+        # Isaac-GR00T PolicyClient
+        from gr00t.policy.server_client import PolicyClient
 
-    n1_policy = PolicyClient(host=config.host, port=config.port)
+        n1_policy = PolicyClient(host=config.host, port=config.port)
 
     print(f"Connecting to PolicyServer at {config.host}:{config.port}...")
     if n1_policy.ping():
@@ -631,6 +655,10 @@ def main(config: InferenceConfig):
     action_chunk_index = 0
     last_inference_time = 0.0
     inference_interval = 1.0 / config.rate
+    latency_steps = None  # --rtc: inference latency in chunk rows (moving average)
+    rows_per_tick = config.policy_fps / config.action_publish_rate  # chunk rows advanced per published action
+    rtc_reset_pending = True  # --rtc: the next request starts fresh (no previous chunk to continue)
+    request_time = None  # --rtc: when the request in flight was queued
 
     zmq_frame_counter = 0
     last_sent_motion_token: np.ndarray | None = None
@@ -641,7 +669,7 @@ def main(config: InferenceConfig):
         nonlocal pause_loop, cpp_loop_running, cpp_mode
         nonlocal initial_pose_left_hand_closed, initial_pose_right_hand_closed
         nonlocal cached_action_chunk, action_chunk_index, last_inference_time
-        nonlocal zmq_frame_counter, last_sent_motion_token
+        nonlocal zmq_frame_counter, last_sent_motion_token, rtc_reset_pending
 
         key = keyboard_listener.read_msg()
         if key is None:
@@ -681,10 +709,16 @@ def main(config: InferenceConfig):
             zmq_frame_counter = 0
             cached_action_chunk = None
             action_chunk_index = 0
+            rtc_reset_pending = True
             print("Cleared cached action chunk, reset frame counter")
         elif key == "p":
             pause_loop = not pause_loop
             print(f"{'Paused' if pause_loop else 'Resumed'} policy loop")
+            if not pause_loop and config.rtc:
+                # the chunk cached while paused never ran: start from a fresh one
+                cached_action_chunk = None
+                action_chunk_index = 0
+                rtc_reset_pending = True
             if pause_loop:
                 print("Policy loop paused (C++ loop still running - press 'k' to stop)")
             else:
@@ -730,7 +764,7 @@ def main(config: InferenceConfig):
             result_queue,
             inference_stop_event,
             inference_busy_event,
-            lambda: prepare_observation_from_sensors(
+            lambda: _transform_observation(observation_transform, prepare_observation_from_sensors(
                 camera_subscriber=camera_subscriber,
                 state_subscriber=state_subscriber,
                 robot_model=robot_model,
@@ -740,11 +774,12 @@ def main(config: InferenceConfig):
                 dex1_cache=dex1_cache,
                 head_state_sock=head_state_sock,
                 head_state_cache=[head_state_cache] if head_state_cache is not None else None,
-            ),
-            lambda obs: run_policy_inference_and_process(
+            )),
+            lambda obs, options: run_policy_inference_and_process(
                 policy=n1_policy,
                 observation=obs,
                 robot_model=robot_model,
+                options=options,
             ),
         ),
         daemon=True,
@@ -761,28 +796,58 @@ def main(config: InferenceConfig):
                 processed_action, inference_start_time = result_queue.get_nowait()
                 inference_delay = time.monotonic() - inference_start_time
                 action_chunk_index = calculate_latency_compensated_index(
-                    inference_delay, config.action_publish_rate, config.action_horizon
+                    inference_delay, config.policy_fps, config.action_horizon
                 )
                 cached_action_chunk = processed_action
                 last_inference_time = time.monotonic()
+                request_time = None
+                delay_steps = inference_delay * config.policy_fps
+                latency_steps = delay_steps if latency_steps is None else 0.8 * latency_steps + 0.2 * delay_steps
                 print_green(
                     f'New action chunk (prompt: "{language_prompt_ref[0]}", '
-                    f"latency: {inference_delay:.3f}s)"
+                    f"latency: {inference_delay:.3f}s, starting at row {action_chunk_index})"
                 )
             except queue.Empty:
                 pass
 
             worker_is_busy = inference_busy_event.is_set()
-            should_start = should_trigger_new_inference(
-                cached_chunk_exists=(cached_action_chunk is not None),
-                inference_thread_running=worker_is_busy,
-                time_since_last_inference=(time.monotonic() - last_inference_time),
-                inference_interval=inference_interval,
-            )
+            if request_time is not None and not worker_is_busy and time.monotonic() - request_time > 1.0:
+                request_time = None  # the worker dropped it (no observation yet)
+            if config.rtc and cached_action_chunk is not None:
+                # the next chunk takes over after execute_steps: ask early by the latency
+                lead = int(np.ceil(latency_steps or 0))
+                should_start = (
+                    not pause_loop
+                    and request_time is None
+                    and not worker_is_busy
+                    and action_chunk_index >= config.execute_steps - lead
+                )
+            else:
+                should_start = should_trigger_new_inference(
+                    cached_chunk_exists=(cached_action_chunk is not None),
+                    inference_thread_running=worker_is_busy,
+                    time_since_last_inference=(time.monotonic() - last_inference_time),
+                    inference_interval=inference_interval,
+                )
 
             if should_start:
+                options = None
+                if config.rtc:
+                    if rtc_reset_pending or cached_action_chunk is None:
+                        options = {"rtc_reset": True}
+                    else:
+                        # the server inpaints the new chunk's start from this chunk's steps
+                        # action_chunk_index.., freezing the ones that run while it infers
+                        options = {
+                            "rtc_executed_steps": int(action_chunk_index),
+                            "rtc_frozen_steps": int(np.ceil(latency_steps or 0)),
+                            "rtc_ramp_rate": config.rtc_ramp_rate,
+                        }
                 try:
-                    inference_queue.put_nowait(None)
+                    inference_queue.put_nowait(options)
+                    request_time = time.monotonic()
+                    if options and options.get("rtc_reset"):
+                        rtc_reset_pending = False
                 except queue.Full:
                     pass
 
@@ -814,7 +879,7 @@ def main(config: InferenceConfig):
                         motion_token = motion_token[0]
 
                     horizon = motion_token.shape[0] if motion_token.ndim == 2 else 1
-                    current_idx = min(action_chunk_index, horizon - 1)
+                    current_idx = min(int(action_chunk_index), horizon - 1)  # hold a row until the next is due
 
                     if motion_token.ndim == 2:
                         motion_token = motion_token[current_idx]
@@ -905,7 +970,7 @@ def main(config: InferenceConfig):
                                 f"token shape: {motion_token.shape}"
                             )
 
-                action_chunk_index = min(action_chunk_index + 1, config.action_horizon - 1)
+                action_chunk_index = min(action_chunk_index + rows_per_tick, config.action_horizon - 1)
 
             end_time = time.monotonic()
 
@@ -929,6 +994,13 @@ def main(config: InferenceConfig):
         state_subscriber.close()
         keyboard_listener.close()
         print("Shutdown complete.")
+
+
+def _transform_observation(observation_transform, observation):
+    """observation_transform(observation), passing None (sensors not ready) through."""
+    if observation is None or observation_transform is None:
+        return observation
+    return observation_transform(observation)
 
 
 def _sleep_remaining(t_start: float, loop_period: float):
